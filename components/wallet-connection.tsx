@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { useWallet } from "@/hooks/use-wallet"
 
 interface WalletConnectionProps {
@@ -39,6 +39,12 @@ export function WalletConnection({ onAddressChange }: WalletConnectionProps) {
   const formatAddress = (addr: string) => {
     return `${addr.substring(0, 6)}...${addr.substring(38)}`
   }
+
+  useEffect(() => {
+    if (isConnected && address) {
+      onAddressChange(address)
+    }
+  }, [isConnected, address, onAddressChange])
 
   if (!isMetaMaskInstalled && typeof window !== "undefined") {
     return (
