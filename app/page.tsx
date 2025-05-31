@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { Wallet, Loader2, AlertCircle, Send, CheckCircle2, Eye, X, Shield } from "lucide-react"
+import { Wallet, Loader2, AlertCircle, Send, CheckCircle2, Eye, X, Shield, Zap } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -9,14 +9,17 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Checkbox } from "@/components/ui/checkbox"
-import { WalletConnection } from "@/components/wallet-connection"
-import { NetworkSelector, type Network } from "@/components/network-selector"
+import type { Network } from "@/components/network-selector"
 import { TransactionPreview } from "@/components/transaction-preview"
 import { ScamWarning, ScamTokenBadge } from "@/components/scam-warning"
 import type { PectraBundle } from "@/utils/pectra-bundle"
 import { ScamDetector, type Token } from "@/utils/scam-detection"
-import { getTokenBalance } from "@/utils/token-balance" // Import getTokenBalance
+import { getTokenBalance } from "@/utils/token-balance"
 import { EIP7702BundleManager, type EIP7702Bundle } from "@/utils/eip7702-bundle"
+// Añadir la importación del componente WalletConnection
+import { WalletConnection } from "@/components/wallet-connection"
+// Añadir la importación de NetworkSelector que también falta
+import { NetworkSelector } from "@/components/network-selector"
 
 // Actualizar NATIVE_TOKENS para incluir Sepolia
 const NATIVE_TOKENS: Record<string, Omit<Token, "balance" | "selected">> = {
@@ -189,6 +192,7 @@ export default function TokenViewer() {
   const [showPreview, setShowPreview] = useState(false)
   const [bundlePreview, setBundlePreview] = useState<EIP7702Bundle | null>(null)
   const [bundleManager] = useState(() => new EIP7702BundleManager())
+  const [isEIP7702Supported, setIsEIP7702Supported] = useState(false)
 
   const isValidEthereumAddress = (address: string) => {
     return /^0x[a-fA-F0-9]{40}$/.test(address)
@@ -842,18 +846,36 @@ export default function TokenViewer() {
     }
   }
 
+  // Verificar soporte EIP-7702 cuando cambie la red
+  useEffect(() => {
+    const checkSupport = async () => {
+      if (selectedNetwork.eip7702Supported) {
+        const supported = await bundleManager.checkEIP7702Support()
+        setIsEIP7702Supported(supported)
+        console.log(`🔍 EIP-7702 support: ${supported}`)
+      } else {
+        setIsEIP7702Supported(false)
+      }
+    }
+
+    checkSupport()
+  }, [selectedNetwork, bundleManager])
+
   const handleExecuteBundle = async () => {
     if (!bundlePreview) return
 
-    // Verificar soporte EIP-7702
-    const eip7702Supported = await bundleManager.checkEIP7702Support()
-
-    const confirmMessage = eip7702Supported
-      ? `You are about to send ${selectedTokens.length} transactions as an EIP-7702 atomic bundle.\n\n` +
-        `This will be executed as a single transaction on Sepolia using native Pectra support.\n\n` +
+    const confirmMessage = isEIP7702Supported
+      ? `🚀 EIP-7702 Atomic Bundle Execution\n\n` +
+        `✅ Single signature required\n` +
+        `✅ All ${selectedTokens.length} transactions execute atomically\n` +
+        `✅ All succeed together or all fail together\n` +
+        `✅ Reduced gas costs\n\n` +
+        `Your EOA will temporarily act as a smart contract.\n\n` +
         `Do you want to continue?`
-      : `EIP-7702 not available. You are about to send ${selectedTokens.length} transactions sequentially.\n\n` +
-        `Your wallet will ask you to sign each transaction individually.\n\n` +
+      : `⚠️ Sequential Transaction Execution\n\n` +
+        `❌ EIP-7702 not available on this network\n` +
+        `📝 ${selectedTokens.length} separate signatures required\n` +
+        `⚠️ Transactions may partially succeed/fail\n\n` +
         `Do you want to continue?`
 
     const confirmBatch = confirm(confirmMessage)
@@ -866,15 +888,21 @@ export default function TokenViewer() {
     setError(null)
 
     try {
-      console.log("🚀 Executing EIP-7702 bundle...")
+      console.log("🚀 Executing bundle...")
 
       const txHash = await bundleManager.executeEIP7702Bundle(bundlePreview)
 
-      console.log("✅ EIP-7702 bundle executed successfully:", txHash)
+      console.log("✅ Bundle executed successfully:", txHash)
 
-      const successMessage = eip7702Supported
-        ? `EIP-7702 bundle executed successfully!\n\nBundle hash: ${txHash}\n\nAll transactions were executed atomically.`
-        : `Transactions sent successfully!\n\nFirst transaction hash: ${txHash}\n\nCheck your wallet for all transaction confirmations.`
+      const successMessage = isEIP7702Supported
+        ? `🎉 EIP-7702 Atomic Bundle Executed!\n\n` +
+          `Bundle Hash: ${txHash}\n\n` +
+          `✅ All ${selectedTokens.length} transactions executed atomically\n` +
+          `✅ Single signature used\n` +
+          `✅ Gas optimized execution`
+        : `✅ Sequential Transactions Completed!\n\n` +
+          `First Transaction Hash: ${txHash}\n\n` +
+          `Check your wallet for all transaction confirmations.`
 
       alert(successMessage)
 
@@ -884,8 +912,8 @@ export default function TokenViewer() {
       setShowPreview(false)
       setBundlePreview(null)
     } catch (err) {
-      console.error("❌ EIP-7702 bundle execution failed:", err)
-      setError(err instanceof Error ? err.message : "Failed to execute EIP-7702 bundle")
+      console.error("❌ Bundle execution failed:", err)
+      setError(err instanceof Error ? err.message : "Failed to execute bundle")
     } finally {
       setIsTransferring(false)
     }
@@ -898,16 +926,19 @@ export default function TokenViewer() {
           <CardTitle className="flex items-center gap-2">
             <Wallet className="h-5 w-5" />
             Ethereum Token Migration (EIP-7702 Pectra)
+            {isEIP7702Supported && <Zap className="h-5 w-5 text-yellow-500" />}
           </CardTitle>
           <CardDescription>
-            Connect your wallet to view tokens and migrate them to another address using EIP-7702 bundled transactions
-            (Pectra upgrade)
+            Connect your wallet to view tokens and migrate them using EIP-7702 atomic bundles
+            {isEIP7702Supported && " - Single signature, atomic execution enabled!"}
           </CardDescription>
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
+            {/* Componente de conexión de wallet - DEBE estar aquí */}
             <WalletConnection onAddressChange={setConnectedAddress} />
 
+            {/* Selector de red */}
             <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
               <div className="flex-1">
                 <label className="text-sm font-medium mb-2 block">Network</label>
@@ -921,6 +952,27 @@ export default function TokenViewer() {
             </div>
           </div>
 
+          {/* EIP-7702 Status Alert */}
+          {selectedNetwork.eip7702Supported && (
+            <Alert
+              className={`mt-4 ${isEIP7702Supported ? "border-green-200 bg-green-50" : "border-yellow-200 bg-yellow-50"}`}
+            >
+              <Zap className={`h-4 w-4 ${isEIP7702Supported ? "text-green-600" : "text-yellow-600"}`} />
+              <AlertDescription className={isEIP7702Supported ? "text-green-800" : "text-yellow-800"}>
+                {isEIP7702Supported ? (
+                  <>
+                    <strong>EIP-7702 Active:</strong> Atomic bundling enabled! Single signature for all transactions.
+                  </>
+                ) : (
+                  <>
+                    <strong>EIP-7702 Checking:</strong> Verifying atomic bundle support...
+                  </>
+                )}
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {/* Error alert */}
           {error && (
             <Alert variant="destructive" className="mt-4">
               <AlertCircle className="h-4 w-4" />
@@ -1082,6 +1134,7 @@ export default function TokenViewer() {
                     estimatedCost={bundlePreview.estimatedCost}
                     onConfirm={handleExecuteBundle}
                     onCancel={() => setShowPreview(false)}
+                    isEIP7702Supported={isEIP7702Supported}
                   />
 
                   <div className="flex gap-3">
@@ -1089,12 +1142,14 @@ export default function TokenViewer() {
                       {isTransferring ? (
                         <>
                           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          Executing EIP-7702 Bundle...
+                          {isEIP7702Supported ? "Executing Atomic Bundle..." : "Sending Transactions..."}
                         </>
                       ) : (
                         <>
-                          <Send className="mr-2 h-4 w-4" />
-                          Execute EIP-7702 Bundle ({selectedTokens.length})
+                          {isEIP7702Supported ? <Zap className="mr-2 h-4 w-4" /> : <Send className="mr-2 h-4 w-4" />}
+                          {isEIP7702Supported
+                            ? `Execute Atomic Bundle (${selectedTokens.length})`
+                            : `Send Sequential Transactions (${selectedTokens.length})`}
                         </>
                       )}
                     </Button>
