@@ -23,6 +23,60 @@ interface Token {
   selected?: boolean
 }
 
+interface BlockscoutResponse {
+  status: string
+  message: string
+  result: BlockscoutToken[]
+}
+
+interface BlockscoutToken {
+  type: string
+  name: string
+  symbol: string
+  balance: string
+  decimals: string
+  tokenID?: string
+  contractAddress: string
+}
+
+// Blockscout API endpoints for different networks
+const BLOCKSCOUT_ENDPOINTS = {
+  gnosis: "https://gnosis.blockscout.com/api",
+  ethereum: "https://eth.blockscout.com/api",
+  polygon: "https://polygon.blockscout.com/api",
+  optimism: "https://optimism.blockscout.com/api",
+  // Add more networks as needed
+}
+
+
+// Cache para almacenar resultados de solicitudes
+const requestCache = new Map<string, { data: BlockscoutResponse; timestamp: number }>()
+const CACHE_DURATION = 5 * 60 * 1000 // 5 minutos en milisegundos
+
+// Función para hacer solicitudes con reintentos
+async function fetchWithRetry(url: string, maxRetries = 3) {
+  let retries = 0
+  while (retries < maxRetries) {
+    try {
+      const response = await fetch(url)
+      if (response.status === 429) {
+        // Esperar con backoff exponencial
+        const delay = Math.pow(2, retries) * 1000
+        await new Promise(resolve => setTimeout(resolve, delay))
+        retries++
+        continue
+      }
+      return response
+    } catch (error) {
+      if (retries === maxRetries - 1) throw error
+      retries++
+      const delay = Math.pow(2, retries) * 1000
+      await new Promise(resolve => setTimeout(resolve, delay))
+    }
+  }
+  throw new Error('Max retries reached')
+}
+
 export default function TokenViewer() {
   const [connectedAddress, setConnectedAddress] = useState("")
   const [destinationAddress, setDestinationAddress] = useState("")
@@ -48,9 +102,22 @@ export default function TokenViewer() {
 
     try {
       const blockscoutBaseUrl = selectedNetwork.endpoint
-      console.log(`Fetching tokens for ${address} from ${blockscoutBaseUrl}...`)
 
-      const response = await fetch(`${blockscoutBaseUrl}?module=account&action=tokenlist&address=${address}`)
+      console.log(`Fetching tokens for ${address} from ${blockscoutBaseUrl}...`)
+      const cacheKey = `${blockscoutBaseUrl}-${address}`
+      const cachedData = requestCache.get(cacheKey)
+
+      // Verificar si tenemos datos en caché y si no han expirado
+      if (cachedData && Date.now() - cachedData.timestamp < CACHE_DURATION) {
+        const formattedTokens = formatTokens(cachedData.data.result)
+        setTokens(formattedTokens)
+        setIsLoading(false)
+        return
+      }
+
+      const response = await fetchWithRetry(
+        `${blockscoutBaseUrl}?module=account&action=tokenlist&address=${address}`
+      )
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
@@ -68,24 +135,31 @@ export default function TokenViewer() {
       if (data.status !== "1" && !data.result) {
         throw new Error(data.message || "Failed to fetch tokens from Blockscout")
       }
+// Transform Blockscout response to our Token interface
+const formattedTokens: Token[] = (data.result || []).map((token: any) => {
+  // Determine token type based on available fields
+  const isERC721 = token.type === "ERC-721" || token.tokenID !== undefined
 
-      // Transform Blockscout response to our Token interface
-      const formattedTokens: Token[] = (data.result || []).map((token: any) => {
-        // Determine token type based on available fields
-        const isERC721 = token.type === "ERC-721" || token.tokenID !== undefined
+  return {
+    type: isERC721 ? ("ERC721" as const) : ("ERC20" as const),
+    name: token.name || "Unknown Token",
+    symbol: token.symbol || "???",
+    balance: isERC721 ? "1" : formatTokenBalance(token.balance, token.decimals),
+    decimals: isERC721 ? undefined : Number.parseInt(token.decimals) || 18,
+    tokenId: isERC721 ? token.tokenID : undefined,
+    contractAddress: token.contractAddress,
+    selected: false,
+  }
+})
 
-        return {
-          type: isERC721 ? ("ERC721" as const) : ("ERC20" as const),
-          name: token.name || "Unknown Token",
-          symbol: token.symbol || "???",
-          balance: isERC721 ? "1" : formatTokenBalance(token.balance, token.decimals),
-          decimals: isERC721 ? undefined : Number.parseInt(token.decimals) || 18,
-          tokenId: isERC721 ? token.tokenID : undefined,
-          contractAddress: token.contractAddress,
-          selected: false,
-        }
-      })
+// Guardar en caché
+requestCache.set(cacheKey, {
+  data,
+  timestamp: Date.now()
+})
 
+
+      const formattedTokens = formatTokens(data.result)
       setTokens(formattedTokens)
     } catch (err) {
       console.error("Error fetching tokens:", err)
@@ -94,16 +168,32 @@ export default function TokenViewer() {
       setIsLoading(false)
     }
   }
+// Función auxiliar para formatear tokens
+const formatTokens = (tokens: BlockscoutToken[]): Token[] => {
+  return tokens.map((token: BlockscoutToken) => {
+    const isERC721 = token.type === "ERC-721" || token.tokenID !== undefined
 
-  // Auto-fetch tokens when wallet is connected
-  useEffect(() => {
-    if (connectedAddress && isValidEthereumAddress(connectedAddress)) {
-      handleCheckTokens(connectedAddress)
-    } else {
-      // Reset tokens if wallet is disconnected
-      setTokens([])
+    return {
+      type: isERC721 ? ("ERC721" as const) : ("ERC20" as const),
+      name: token.name || "Unknown Token",
+      symbol: token.symbol || "???",
+      balance: isERC721 ? "1" : formatTokenBalance(token.balance, token.decimals),
+      decimals: isERC721 ? undefined : Number.parseInt(token.decimals) || 18,
+      tokenId: isERC721 ? token.tokenID : undefined,
+      contractAddress: token.contractAddress,
     }
-  }, [connectedAddress, selectedNetwork])
+  })
+}
+
+// Auto-fetch tokens when wallet is connected
+useEffect(() => {
+  if (connectedAddress && isValidEthereumAddress(connectedAddress)) {
+    handleCheckTokens(connectedAddress)
+  } else {
+    // Reset tokens if wallet is disconnected
+    setTokens([])
+  }
+}, [connectedAddress, selectedNetwork])
 
   const formatTokenBalance = (balance: string, decimals: string | number) => {
     try {
