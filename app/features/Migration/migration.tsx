@@ -1,6 +1,6 @@
 "use client"
 
-import { createWalletClient, http, createPublicClient, encodeFunctionData } from 'viem'
+import { createWalletClient, http, encodeFunctionData } from 'viem'
 import { mainnet } from 'viem/chains'
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
@@ -10,6 +10,7 @@ import { AlertCircle } from 'lucide-react'
 
 // Direcciones de contratos en Ethereum mainnet
 const MIGRATOR_ADDRESS = "0xf5aF47b26047E3aAc74F39075F4fa9224FC9Ff68" as `0x${string}`
+const MULTICALL_ADDRESS = "0xcA11bde05977b3631167028862bE2a173976CA11" as `0x${string}`
 
 interface Token {
     address: string
@@ -25,6 +26,43 @@ interface NFT {
     tokenId: string
     name?: string
 }
+
+// ABI para tokens ERC20
+const ERC20_ABI = [
+    {
+        "inputs": [
+            { "name": "spender", "type": "address" },
+            { "name": "amount", "type": "uint256" }
+        ],
+        "name": "approve",
+        "outputs": [{ "name": "", "type": "bool" }],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    }
+]
+
+// ABI para Multicall3
+const MULTICALL_ABI = [
+    {
+        "inputs": [
+            {
+                "components": [
+                    { "name": "target", "type": "address" },
+                    { "name": "callData", "type": "bytes" }
+                ],
+                "name": "calls",
+                "type": "tuple[]"
+            }
+        ],
+        "name": "aggregate",
+        "outputs": [
+            { "name": "blockNumber", "type": "uint256" },
+            { "name": "returnData", "type": "bytes[]" }
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    }
+]
 
 // ABI para el contrato Migrator2
 const MIGRATOR_ABI = [
@@ -56,30 +94,6 @@ const MIGRATOR_ABI = [
     }
 ]
 
-// ABI para tokens ERC20
-const ERC20_ABI = [
-    {
-        "inputs": [
-            { "name": "spender", "type": "address" },
-            { "name": "amount", "type": "uint256" }
-        ],
-        "name": "approve",
-        "outputs": [{ "name": "", "type": "bool" }],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    },
-    {
-        "inputs": [
-            { "name": "owner", "type": "address" },
-            { "name": "spender", "type": "address" }
-        ],
-        "name": "allowance",
-        "outputs": [{ "name": "", "type": "uint256" }],
-        "stateMutability": "view",
-        "type": "function"
-    }
-]
-
 export default function Migration() {
     const [tokens, setTokens] = useState<Token[]>([])
     const [nfts, setNfts] = useState<NFT[]>([])
@@ -88,11 +102,6 @@ export default function Migration() {
     const [newWallet, setNewWallet] = useState<string>('')
 
     const walletClient = createWalletClient({
-        chain: mainnet,
-        transport: http(),
-    })
-
-    const publicClient = createPublicClient({
         chain: mainnet,
         transport: http(),
     })
@@ -152,61 +161,51 @@ export default function Migration() {
             // Separar tokens normales y dust
             const normalTokens = tokens.filter(t => !t.isDust)
             const dustTokens = tokens.filter(t => t.isDust)
-            const erc20s = normalTokens.map(t => t.address)
+            const erc20s = normalTokens.map(t => t.address as `0x${string}`)
             const nftTransfers = nfts.map(n => ({
-                nft: n.address,
-                tokenId: n.tokenId
+                nft: n.address as `0x${string}`,
+                tokenId: BigInt(n.tokenId)
             }))
             const dustSwaps = dustTokens.map(t => ({
-                token: t.address,
-                minOut: t.minOut || "0"
+                token: t.address as `0x${string}`,
+                minOut: BigInt(t.minOut || "0")
             }))
 
-            // Crear bundle de transacciones
-            const transactions = []
+            // Crear array de llamadas para Multicall
+            const calls = []
 
             // 1. Agregar aprobaciones de tokens
             for (const token of tokens) {
-                const tokenAddress = token.address as `0x${string}`
-                const currentAllowance = await publicClient.readContract({
-                    address: tokenAddress,
-                    abi: ERC20_ABI,
-                    functionName: 'allowance',
-                    args: [accountAddress, MIGRATOR_ADDRESS]
-                })
-
-                if (BigInt(currentAllowance as bigint) < BigInt(token.balance)) {
-                    transactions.push({
-                        to: tokenAddress,
-                        data: encodeFunctionData({
-                            abi: ERC20_ABI,
-                            functionName: 'approve',
-                            args: [MIGRATOR_ADDRESS, BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")]
-                        })
+                calls.push({
+                    target: token.address as `0x${string}`,
+                    callData: encodeFunctionData({
+                        abi: ERC20_ABI,
+                        functionName: 'approve',
+                        args: [MIGRATOR_ADDRESS, BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")]
                     })
-                }
+                })
             }
 
-            // 2. Agregar transacción de migración
-            transactions.push({
-                to: MIGRATOR_ADDRESS,
-                data: encodeFunctionData({
+            // 2. Agregar llamada de migración
+            calls.push({
+                target: MIGRATOR_ADDRESS,
+                callData: encodeFunctionData({
                     abi: MIGRATOR_ABI,
                     functionName: 'executeMigration',
                     args: [newWallet, erc20s, nftTransfers, dustSwaps]
                 })
             })
 
-            // Ejecutar transacciones en secuencia
-            for (const tx of transactions) {
-                await walletClient.sendTransaction({
-                    account: accountAddress,
-                    to: tx.to,
-                    data: tx.data
-                })
-            }
+            // Ejecutar Multicall
+            const result = await walletClient.writeContract({
+                account: accountAddress,
+                address: MULTICALL_ADDRESS,
+                abi: MULTICALL_ABI,
+                functionName: 'aggregate',
+                args: [calls]
+            })
 
-            console.log('Migración completada')
+            console.log('Migración completada:', result)
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Error en la migración')
         } finally {
