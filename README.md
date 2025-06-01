@@ -1,36 +1,54 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
-## Getting Started
+# Migrator Wallet
 
-First, run the development server:
+We are leveraging EIP-7702 to temporarily delegate EOAs to smart accounts, enabling Web3 users to migrate all their assets — ERC-20s, NFTs, dust tokens — with a single click.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+This delegation allows externally owned accounts (EOAs) to execute smart contract logic without converting to a smart wallet permanently. By signing a short-lived authorization, the EOA temporarily behaves like a contract account, enabling complex asset transfers such as:
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+ERC-20 transfers (including custom tokens)
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+NFT migrations (ERC-721 / ERC-1155)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Dust token swaps via integrated routers (e.g. Uniswap)
 
-## Learn More
+Scam token filtering (optional)
 
-To learn more about Next.js, take a look at the following resources:
+All wrapped into a single bundled transaction
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Smart Contracts Deployed
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- [Sepolia](https://sepolia.etherscan.io/address/0xB2491C3c204E9bC257FEb9Fb6A44c3706efa5A19#code)
+- [Flow EVM Mainet](https://evm.flowscan.io/address/0xcCFC776c4723d5606987e5cc2b0B5AF183EDAb67#code)
+- [ETHEREUM Mainnet](https://etherscan.io/address/0x9eCc1Ae7B614e6d63Ddc193070a2a53ADf9fE455#code)
 
-## Deploy on Vercel
+[Smart Contracts Repo](https://github.com/WalletMigrate/contract-migrator/tree/main/contracts)
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Wallets Used for the Demo
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+[Main Wallet](https://sepolia.etherscan.io/address/0x86300e0a857aab39a601e89b0e7f15e1488d9f0c)  
+[Destination/New Wallet](https://sepolia.etherscan.io/address/0xc86A2B3eA295cD70bad34C7871a733e75356C014)
+
+## 🛠 How It’s Made
+
+This project is built around the idea of simplifying wallet migrations for everyday Web3 users, using the cutting-edge capabilities of EIP-7702 and Account Abstraction.
+
+### 🔄 How It Works
+
+The user connects their EOA wallet in the frontend.
+
+The frontend queries token balances (ERC20s, NFTs, etc.).
+
+The user signs an EIP-7702 authorization (not a transaction).
+
+We build a UserOperation that includes:
+
+The Migrator’s bytecode (code)
+
+The EIP-7702 signature (codeSignature)
+
+The calldata for migration logic
+
+The operation is sent to Pimlico’s bundler, which installs the bytecode temporarily onto the EOA and executes the logic — all in a single transaction.
+
+Assets are migrated: transferred, swapped, and cleaned up without user friction.
+

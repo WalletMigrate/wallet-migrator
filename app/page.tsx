@@ -870,7 +870,7 @@ export default function TokenViewer() {
   const handleCheckTokens = async (address: string) => {
     const now = Date.now()
     const timeSinceLastRequest = now - lastRequestTime
-    const minInterval = 1000 // 1 second between requests (reduced since we have API key)
+    const minInterval = 500 // 1 second between requests (reduced since we have API key)
 
     if (timeSinceLastRequest < minInterval) {
       const waitTime = minInterval - timeSinceLastRequest
