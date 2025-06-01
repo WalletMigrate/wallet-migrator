@@ -107,7 +107,9 @@ export function TransactionPreview({
               {isEIP7702Supported ? "EIP-7702 Atomic Bundle" : "Sequential Transactions"}
             </Badge>
             <span className="text-xs text-blue-600">
-              {isEIP7702Supported ? "Single signature, all-or-nothing execution" : "Multiple signatures required"}
+              {isEIP7702Supported
+                ? `Single transaction with ${tokens.length} operations, all-or-nothing execution`
+                : `${tokens.length} separate transactions`}
             </span>
           </div>
         </div>

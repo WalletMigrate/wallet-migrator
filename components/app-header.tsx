@@ -17,10 +17,6 @@ export function AppHeader() {
             </p>
           </div>
         </div>
-        <div className="text-xs text-right text-gray-500">
-          <div>Powered by</div>
-          <div className="font-semibold">Pectra Protocol</div>
-        </div>
       </div>
     </header>
   )

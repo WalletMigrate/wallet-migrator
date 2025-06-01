@@ -998,6 +998,7 @@ export default function TokenViewer() {
   const legitimateTokens = tokens.filter((token) => !token.isScam)
   const scamStats = ScamDetector.getScamStats(tokens)
 
+  // Añadir este console.log en la función handlePreviewBundle para verificar qué tipo de transacción se está preparando
   const handlePreviewBundle = async () => {
     if (!isValidEthereumAddress(destinationAddress)) {
       setError("Please enter a valid destination address")
@@ -1028,12 +1029,30 @@ export default function TokenViewer() {
 
       // Preparar las transacciones bundled
       console.log("📋 Preparing bundled transactions...")
-      const transactions = bundleManager.prepareBundledTransactions(
+      const transactions = await bundleManager.prepareBundledTransactions(
         selectedTokens,
         connectedAddress,
         destinationAddress,
       )
-      console.log(`✅ Prepared ${transactions.length} transactions`)
+
+      // Buscar la función handlePreviewBundle y reemplazar el console.log después de "🔍 TRANSACTION DEBUG:" con:
+
+      console.log("🔍 TRANSACTION DEBUG:", transactions)
+      console.log(`📊 Preparando ${transactions.length} transacciones para envío atómico:`)
+      transactions.forEach((tx, index) => {
+        const functionSelector = tx.data.substring(0, 10)
+        let txType = "Desconocido"
+
+        if (tx.data === "0x") {
+          txType = "Transferencia ETH"
+        } else if (functionSelector === "0xa9059cbb") {
+          txType = "Transferencia ERC20"
+        } else if (functionSelector === "0x23b872dd") {
+          txType = "Transferencia ERC721"
+        }
+
+        console.log(`  ${index + 1}. ${txType} -> ${tx.to}, Valor: ${tx.value}, Gas: ${tx.gasLimit || "auto"}`)
+      })
 
       // Estimar gas
       console.log("⛽ Estimating gas for bundle...")
@@ -1411,8 +1430,6 @@ export default function TokenViewer() {
 
 // Al final del archivo, después del return statement de TokenViewer, agregar:
 
-}
-
 // Componente corregido para usar IDs únicos
 function SelectableTokenList({
   tokens,
@@ -1424,7 +1441,6 @@ function SelectableTokenList({
   networkId: string
 }) {
   if (tokens.length === 0) {
-    \
     return <div className="text-center py-6 text-neutral-500">No tokens found</div>
   }
 
