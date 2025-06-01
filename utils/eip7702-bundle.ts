@@ -1,5 +1,19 @@
 "use client"
 
+import {
+  createWalletClient,
+  createPublicClient,
+  http,
+  custom,
+  parseEther,
+  encodeFunctionData,
+  type Address,
+  type Hash,
+  type WalletClient,
+  type PublicClient,
+} from "viem"
+import { sepolia, mainnet } from "viem/chains"
+
 interface Token {
   type: "ERC20" | "ERC721" | "NATIVE"
   name: string
@@ -26,22 +40,179 @@ interface EIP7702Bundle {
   bundleHash?: string
 }
 
-// ERC20 transfer function selector
-const ERC20_TRANSFER_SELECTOR = "0xa9059cbb"
-// ERC721 transferFrom function selector
-const ERC721_TRANSFER_FROM_SELECTOR = "0x23b872dd"
-// Bytecode for the temporary contract that will handle the bundle
-const BUNDLE_CONTRACT_BYTECODE = `
-608060405234801561001057600080fd5b506004361061002b5760003560e01c8063f242432a14610030575b600080fd5b61004a60048036038101906100459190610234565b61004c565b005b60005b8351811015610123576000848281518110610069576100686102a4565b5b602002602001015190506000848381518110610088576100876102a4565b5b6020026020010151905060008483815181106100a7576100a66102a4565b5b602002602001015190506000808473ffffffffffffffffffffffffffffffffffffffff16848460405160006040518083038185875af1925050503d8060008114610110576040519150601f19603f3d011682016040523d82523d6000602084013e610115565b606091505b50509050505050808061012790610303565b91505061004f565b50505050565b6000604051905090565b600080fd5b600080fd5b600080fd5b6000601f19601f8301169050919050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052604160045260246000fd5b61018f82610146565b810181811067ffffffffffffffff821117156101ae576101ad610157565b5b80604052505050565b60006101c1610129565b90506101cd8282610186565b919050565b600067ffffffffffffffff8211156101ed576101ec610157565b5b602082029050602081019050919050565b6000604051905090565b600080fd5b600073ffffffffffffffffffffffffffffffffffffffff82169050919050565b600061022e82610203565b9050919050565b61023e81610223565b811461024957600080fd5b50565b60008135905061025b81610235565b92915050565b600080fd5b600080fd5b7f4e487b7100000000000000000000000000000000000000000000000000000000600052603260045260246000fd5b7f4e487b7100000000000000000000000000000000000000000000000000000000600052601160045260246000fd5b600061030e82610261565b91507fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8203610340576103406102d3565b5b60018201905091905056fea2646970667358221220...
-`
+// ERC20 ABI for transfer function
+const ERC20_ABI = [
+  {
+    name: "transfer",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "to", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    name: "approve",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    name: "allowance",
+    type: "function",
+    stateMutability: "view",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "spender", type: "address" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const
+
+// ERC721 ABI for transferFrom function
+const ERC721_ABI = [
+  {
+    name: "transferFrom",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "from", type: "address" },
+      { name: "to", type: "address" },
+      { name: "tokenId", type: "uint256" },
+    ],
+    outputs: [],
+  },
+  {
+    name: "approve",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "to", type: "address" },
+      { name: "tokenId", type: "uint256" },
+    ],
+    outputs: [],
+  },
+  {
+    name: "getApproved",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "tokenId", type: "uint256" }],
+    outputs: [{ name: "", type: "address" }],
+  },
+] as const
+
+// Pectra Bundle Contract ABI
+const PECTRA_BUNDLE_ABI = [
+  {
+    name: "executeBatch",
+    type: "function",
+    stateMutability: "payable",
+    inputs: [
+      { name: "targets", type: "address[]" },
+      { name: "values", type: "uint256[]" },
+      { name: "calldatas", type: "bytes[]" },
+    ],
+    outputs: [],
+  },
+] as const
+
+// Pectra Bundle Contract Addresses by network
+const PECTRA_BUNDLE_CONTRACTS: Record<number, Address> = {
+  1: "0x9eCc1Ae7B614e6d63Ddc193070a2a53ADf9fE455", // Ethereum Mainnet
+  11155111: "0xB2491C3c204E9bC257FEb9Fb6A44c3706efa5A19", // Sepolia Testnet
+}
+
+// Network configurations
+const NETWORKS = {
+  1: mainnet,
+  11155111: sepolia,
+}
+
+// RPC URLs for public clients with multiple fallbacks
+const RPC_URLS: Record<number, string[]> = {
+  1: ["https://eth.llamarpc.com", "https://rpc.ankr.com/eth", "https://ethereum.publicnode.com"],
+  11155111: [
+    "https://lb.drpc.org/ogrpc?network=sepolia&dkey=Au_X8MHT5km3gTHdk3Zh9IDmb7qePncR8JNRKiqCbUWs",
+    "https://ethereum-sepolia-rpc.publicnode.com",
+    "https://rpc.sepolia.org",
+    "https://sepolia.infura.io/v3/9aa3d95b3bc440fa88ea12eaa4456161",
+    "https://rpc2.sepolia.org",
+  ],
+  747: ["https://mainnet.evm.nodes.onflow.org"],
+}
 
 export class EIP7702BundleManager {
-  private ethereum: any
+  private walletClient: WalletClient | null = null
+  private publicClient: PublicClient | null = null
+  private currentChain: any = null
+  private targetChainId: number | null = null
 
   constructor() {
-    if (typeof window !== "undefined") {
-      this.ethereum = (window as any).ethereum
+    this.initializeClients()
+  }
+
+  /**
+   * Initialize Viem wallet and public clients with proper chain detection
+   */
+  private async initializeClients() {
+    if (typeof window !== "undefined" && window.ethereum) {
+      try {
+        // Get current chain ID first
+        const chainId = await window.ethereum.request({ method: "eth_chainId" })
+        const chainIdDecimal = Number.parseInt(chainId, 16)
+
+        // Get the appropriate chain config
+        this.currentChain = NETWORKS[chainIdDecimal as keyof typeof NETWORKS] || sepolia
+
+        // Initialize wallet client
+        this.walletClient = createWalletClient({
+          chain: this.currentChain,
+          transport: custom(window.ethereum),
+        })
+
+        // Initialize public client with multiple RPC URLs and timeout
+        const rpcUrls = RPC_URLS[chainIdDecimal] || RPC_URLS[11155111]
+        this.publicClient = createPublicClient({
+          chain: this.currentChain,
+          transport: http(rpcUrls[0], {
+            timeout: 10000, // 10 second timeout
+            retryCount: 3,
+            retryDelay: 1000,
+          }),
+        })
+
+        console.log(`✅ Viem clients initialized with chain: ${this.currentChain.name}`)
+      } catch (error) {
+        console.error("❌ Failed to initialize Viem clients:", error)
+        // Fallback to sepolia if detection fails
+        this.currentChain = sepolia
+        this.walletClient = createWalletClient({
+          chain: sepolia,
+          transport: custom(window.ethereum),
+        })
+        this.publicClient = createPublicClient({
+          chain: sepolia,
+          transport: http(RPC_URLS[11155111][0], {
+            timeout: 10000,
+            retryCount: 3,
+            retryDelay: 1000,
+          }),
+        })
+      }
     }
+  }
+
+  /**
+   * Set the target chain ID for transactions
+   */
+  public setTargetChainId(chainId: number) {
+    this.targetChainId = chainId
+    console.log(`🎯 Target chain ID set to: ${chainId}`)
   }
 
   /**
@@ -56,86 +227,175 @@ export class EIP7702BundleManager {
   }
 
   /**
-   * Checks if the current network supports EIP-7702
+   * Gets the current chain ID and checks EIP-7702 support
    */
-  async checkEIP7702Support(): Promise<boolean> {
+  async checkEIP7702Support(): Promise<{ supported: boolean; contractAddress?: Address; chainId?: number }> {
     try {
-      if (!this.ethereum) return false
-
-      const chainId = await this.ethereum.request({ method: "eth_chainId" })
-      const chainIdDecimal = Number.parseInt(chainId, 16)
-
-      console.log(`🔍 Current chain ID: ${chainIdDecimal}`)
-
-      // Sepolia has full support for EIP-7702
-      if (chainIdDecimal === 11155111) {
-        console.log("✅ Sepolia detected - EIP-7702 supported")
-        return true
+      if (!this.walletClient) {
+        await this.initializeClients()
+        if (!this.walletClient) return { supported: false }
       }
 
-      return false
+      const chainId = await this.walletClient.getChainId()
+      console.log(`🔍 Current chain ID: ${chainId}`)
+
+      // Update current chain if it changed
+      const newChain = NETWORKS[chainId as keyof typeof NETWORKS]
+      if (newChain && newChain.id !== this.currentChain?.id) {
+        console.log(`🔄 Updating chain configuration from ${this.currentChain?.name || "unknown"} to ${newChain.name}`)
+        this.currentChain = newChain
+
+        // Recreate clients with new chain
+        this.walletClient = createWalletClient({
+          chain: this.currentChain,
+          transport: custom(window.ethereum),
+        })
+
+        const rpcUrls = RPC_URLS[chainId] || RPC_URLS[11155111]
+        this.publicClient = createPublicClient({
+          chain: this.currentChain,
+          transport: http(rpcUrls[0], {
+            timeout: 10000,
+            retryCount: 3,
+            retryDelay: 1000,
+          }),
+        })
+
+        console.log(`🔄 Updated clients to chain: ${this.currentChain.name}`)
+      }
+
+      const contractAddress = PECTRA_BUNDLE_CONTRACTS[chainId]
+      const network = NETWORKS[chainId as keyof typeof NETWORKS]
+
+      if (contractAddress && network) {
+        console.log(`✅ EIP-7702 supported on ${network.name} with contract: ${contractAddress}`)
+        return { supported: true, contractAddress, chainId }
+      }
+
+      console.log(`⚠️ EIP-7702 not supported on chain ${chainId}`)
+      return { supported: false, chainId }
     } catch (error) {
       console.error("❌ Error checking EIP-7702 support:", error)
-      return false
+      return { supported: false }
     }
   }
 
   /**
-   * Creates the bytecode for the temporary contract for EIP-7702
+   * Check if an ERC20 token has enough allowance for the Pectra contract
    */
-  private createBundleContractBytecode(transactions: EIP7702Transaction[]): string {
-    console.log(`🔧 Creating bundle contract for ${transactions.length} transactions`)
+  private async checkAndApproveERC20(
+    tokenAddress: string,
+    ownerAddress: string,
+    amount: bigint,
+    pectraContract: string,
+  ): Promise<boolean> {
+    try {
+      if (!this.publicClient || !this.walletClient) {
+        throw new Error("Clients not initialized")
+      }
 
-    // Creates the bytecode that will execute all transactions in a single call
-    let calldata = "0x"
+      console.log(`🔍 Checking allowance for token ${tokenAddress}...`)
 
-    // Function selector for executeBatch(address[],bytes[],uint256[])
-    calldata += "f242432a" // executeBatch function selector
+      // Check current allowance
+      const allowance = await this.publicClient.readContract({
+        address: tokenAddress as Address,
+        abi: ERC20_ABI,
+        functionName: "allowance",
+        args: [ownerAddress as Address, pectraContract as Address],
+      })
 
-    // Offset for arrays
-    calldata += "0000000000000000000000000000000000000000000000000000000000000060" // offset to addresses array
+      console.log(`📊 Current allowance: ${allowance} (needed: ${amount})`)
 
-    // Calculate offsets dynamically
-    const addressesLength = transactions.length
-    const dataOffset = 96 + addressesLength * 32 // after addresses array
-    const valuesOffset = dataOffset + 32 + addressesLength * 32 // after data array
+      // If allowance is sufficient, return true
+      if (allowance >= amount) {
+        console.log(`✅ Allowance sufficient for token ${tokenAddress}`)
+        return true
+      }
 
-    calldata += dataOffset.toString(16).padStart(64, "0") // offset to data array
-    calldata += valuesOffset.toString(16).padStart(64, "0") // offset to values array
+      // If not, request approval
+      console.log(`🔄 Requesting approval for token ${tokenAddress}...`)
 
-    // Addresses array
-    calldata += addressesLength.toString(16).padStart(64, "0") // array length
-    transactions.forEach((tx) => {
-      calldata += tx.to.slice(2).padStart(64, "0") // address
-    })
+      const [account] = await this.walletClient.getAddresses()
 
-    // Data array
-    calldata += addressesLength.toString(16).padStart(64, "0") // array length
-    let dataOffsetCounter = 32 * addressesLength // start after all offset pointers
-    transactions.forEach((tx) => {
-      calldata += dataOffsetCounter.toString(16).padStart(64, "0") // offset to this data
-      dataOffsetCounter += 32 + Math.ceil((tx.data.length - 2) / 2) // update for next
-    })
+      const hash = await this.walletClient.writeContract({
+        address: tokenAddress as Address,
+        abi: ERC20_ABI,
+        functionName: "approve",
+        args: [pectraContract as Address, amount],
+        account,
+      })
 
-    // Actual data
-    transactions.forEach((tx) => {
-      const dataLength = (tx.data.length - 2) / 2
-      calldata += dataLength.toString(16).padStart(64, "0") // data length
-      calldata += tx.data.slice(2) // actual data
-      // Pad to 32 bytes if needed
-      const padding = (32 - (dataLength % 32)) % 32
-      calldata += "0".repeat(padding * 2)
-    })
+      console.log(`✅ Approval transaction sent: ${hash}`)
 
-    // Values array
-    calldata += addressesLength.toString(16).padStart(64, "0") // array length
-    transactions.forEach((tx) => {
-      const value = BigInt(tx.value || "0")
-      calldata += value.toString(16).padStart(64, "0") // value
-    })
+      // Wait for transaction to be mined
+      console.log(`⏳ Waiting for approval transaction to be mined...`)
+      await this.publicClient.waitForTransactionReceipt({ hash })
 
-    console.log(`🔧 Bundle contract calldata: ${calldata.slice(0, 100)}...`)
-    return calldata
+      console.log(`✅ Approval confirmed for token ${tokenAddress}`)
+      return true
+    } catch (error) {
+      console.error(`❌ Error approving token ${tokenAddress}:`, error)
+      throw new Error(`Failed to approve token ${tokenAddress}: ${this.errorToString(error)}`)
+    }
+  }
+
+  /**
+   * Check if an ERC721 token is approved for the Pectra contract
+   */
+  private async checkAndApproveERC721(
+    tokenAddress: string,
+    ownerAddress: string,
+    tokenId: bigint,
+    pectraContract: string,
+  ): Promise<boolean> {
+    try {
+      if (!this.publicClient || !this.walletClient) {
+        throw new Error("Clients not initialized")
+      }
+
+      console.log(`🔍 Checking approval for NFT ${tokenAddress} #${tokenId}...`)
+
+      // Check current approval
+      const approved = await this.publicClient.readContract({
+        address: tokenAddress as Address,
+        abi: ERC721_ABI,
+        functionName: "getApproved",
+        args: [tokenId],
+      })
+
+      console.log(`📊 Current approval: ${approved} (needed: ${pectraContract})`)
+
+      // If approved, return true
+      if (approved.toLowerCase() === pectraContract.toLowerCase()) {
+        console.log(`✅ Approval sufficient for NFT ${tokenAddress} #${tokenId}`)
+        return true
+      }
+
+      // If not, request approval
+      console.log(`🔄 Requesting approval for NFT ${tokenAddress} #${tokenId}...`)
+
+      const [account] = await this.walletClient.getAddresses()
+
+      const hash = await this.walletClient.writeContract({
+        address: tokenAddress as Address,
+        abi: ERC721_ABI,
+        functionName: "approve",
+        args: [pectraContract as Address, tokenId],
+        account,
+      })
+
+      console.log(`✅ Approval transaction sent: ${hash}`)
+
+      // Wait for transaction to be mined
+      console.log(`⏳ Waiting for approval transaction to be mined...`)
+      await this.publicClient.waitForTransactionReceipt({ hash })
+
+      console.log(`✅ Approval confirmed for NFT ${tokenAddress} #${tokenId}`)
+      return true
+    } catch (error) {
+      console.error(`❌ Error approving NFT ${tokenAddress} #${tokenId}:`, error)
+      throw new Error(`Failed to approve NFT ${tokenAddress} #${tokenId}: ${this.errorToString(error)}`)
+    }
   }
 
   /**
@@ -154,6 +414,13 @@ export class EIP7702BundleManager {
 
     console.log(`📋 Preparing EIP-7702 bundle: ${tokens.length} tokens from ${fromAddress} to ${toAddress}`)
 
+    // Añadir esta verificación al inicio del método:
+    if (fromAddress.toLowerCase() === toAddress.toLowerCase()) {
+      throw new Error("From and to addresses cannot be the same")
+    }
+
+    console.log(`✅ Verified: fromAddress (${fromAddress}) !== toAddress (${toAddress})`)
+
     for (const token of tokens) {
       console.log(`🔄 Processing token: ${token.name} (${token.symbol}) - Type: ${token.type}`)
 
@@ -164,14 +431,14 @@ export class EIP7702BundleManager {
           continue
         }
 
-        const valueInWei = this.parseTokenAmount(token.balance, 18)
-        console.log(`💰 Native token transfer: ${token.balance} ${token.symbol} = ${valueInWei} wei`)
+        const valueInEther = parseEther(token.balance)
+        console.log(`💰 Native token transfer: ${token.balance} ${token.symbol} = ${valueInEther} wei`)
 
         transactions.push({
           to: toAddress,
           data: "0x",
-          value: `0x${valueInWei.toString(16)}`,
-          gasLimit: "0x5208",
+          value: valueInEther.toString(),
+          gasLimit: "0x5208", // 21000 gas for a standard ETH transfer
         })
       } else if (token.type === "ERC20") {
         if (!this.isValidEthereumAddress(token.contractAddress)) {
@@ -187,13 +454,18 @@ export class EIP7702BundleManager {
         const amount = this.parseTokenAmount(token.balance, token.decimals || 18)
         console.log(`🪙 ERC20 transfer: ${token.balance} ${token.symbol} = ${amount} units`)
 
-        const data = this.encodeERC20Transfer(toAddress, amount)
+        // Use Viem to encode the transfer function call
+        const data = encodeFunctionData({
+          abi: ERC20_ABI,
+          functionName: "transfer",
+          args: [toAddress as Address, amount],
+        })
 
         transactions.push({
           to: token.contractAddress,
           data,
-          value: "0x0",
-          gasLimit: "0xC350",
+          value: "0",
+          gasLimit: "0x15F90", // 90000 gas for ERC20 transfer
         })
       } else if (token.type === "ERC721") {
         if (!this.isValidEthereumAddress(token.contractAddress)) {
@@ -203,42 +475,28 @@ export class EIP7702BundleManager {
         const tokenId = BigInt(token.tokenId || "0")
         console.log(`🖼️ NFT transfer: ${token.name} #${tokenId}`)
 
-        const data = this.encodeERC721TransferFrom(fromAddress, toAddress, tokenId)
+        // Use Viem to encode the transferFrom function call
+        const data = encodeFunctionData({
+          abi: ERC721_ABI,
+          functionName: "transferFrom",
+          args: [fromAddress as Address, toAddress as Address, tokenId],
+        })
 
         transactions.push({
           to: token.contractAddress,
           data,
-          value: "0x0",
-          gasLimit: "0x11170",
+          value: "0",
+          gasLimit: "0x1D4C0", // 120000 gas for ERC721 transfer
         })
       }
     }
 
     console.log(`✅ Prepared ${transactions.length} EIP-7702 transactions`)
+    console.log(
+      `📋 Transaction destinations:`,
+      transactions.map((tx) => tx.to),
+    )
     return transactions
-  }
-
-  /**
-   * Encodes the ERC20 transfer call
-   */
-  private encodeERC20Transfer(to: string, amount: bigint): string {
-    const toAddress = to.slice(2).toLowerCase().padStart(64, "0")
-    const amountHex = amount.toString(16).padStart(64, "0")
-    const encoded = `${ERC20_TRANSFER_SELECTOR}${toAddress}${amountHex}`
-    console.log(`🔧 ERC20 transfer encoded: ${encoded}`)
-    return encoded
-  }
-
-  /**
-   * Encodes the ERC721 transferFrom call
-   */
-  private encodeERC721TransferFrom(from: string, to: string, tokenId: bigint): string {
-    const fromAddress = from.slice(2).toLowerCase().padStart(64, "0")
-    const toAddress = to.slice(2).toLowerCase().padStart(64, "0")
-    const tokenIdHex = tokenId.toString(16).padStart(64, "0")
-    const encoded = `${ERC721_TRANSFER_FROM_SELECTOR}${fromAddress}${toAddress}${tokenIdHex}`
-    console.log(`🔧 ERC721 transferFrom encoded: ${encoded}`)
-    return encoded
   }
 
   /**
@@ -272,11 +530,11 @@ export class EIP7702BundleManager {
     for (const tx of transactions) {
       if (tx.data === "0x") {
         // Native transfer
-        totalGas += BigInt(0) // Already included in base cost
-      } else if (tx.data.startsWith(ERC20_TRANSFER_SELECTOR)) {
+        totalGas += BigInt(21000) // Base cost for ETH transfer
+      } else if (tx.data.startsWith("0xa9059cbb")) {
         // ERC20 transfer
         totalGas += BigInt(65000) // Typical ERC20 transfer cost
-      } else if (tx.data.startsWith(ERC721_TRANSFER_FROM_SELECTOR)) {
+      } else if (tx.data.startsWith("0x23b872dd")) {
         // ERC721 transfer
         totalGas += BigInt(85000) // Typical ERC721 transfer cost
       } else {
@@ -286,7 +544,8 @@ export class EIP7702BundleManager {
     }
 
     // Overhead for EIP-7702 bundle execution (much smaller than individual transactions)
-    const bundleOverhead = totalGas + BigInt(50000) // Fixed overhead for the bundle contract
+    // Aumentar el overhead para asegurar que hay suficiente gas
+    const bundleOverhead = totalGas + BigInt(150000) // Increased overhead for the bundle contract
 
     console.log(
       `⛽ EIP-7702 bundle gas estimate: ${bundleOverhead} (vs ${totalGas * BigInt(transactions.length)} individual)`,
@@ -295,202 +554,333 @@ export class EIP7702BundleManager {
   }
 
   /**
-   * Executes the bundle using EIP-7702 native with a single signature
+   * Try to switch to the target network using multiple methods
    */
-  async executeEIP7702Bundle(bundle: EIP7702Bundle): Promise<string> {
-    if (!this.ethereum) {
-      throw new Error("No wallet detected")
+  private async ensureCorrectNetwork(targetChainId: number): Promise<boolean> {
+    console.log(`🔄 Ensuring we're on the correct network: Chain ID ${targetChainId}`)
+
+    if (!window.ethereum) {
+      console.error("❌ No ethereum provider found")
+      return false
     }
 
-    console.log(`🚀 Starting EIP-7702 bundle execution with ${bundle.transactions.length} transactions`)
+    try {
+      // Get current chain ID
+      const currentChainIdHex = await window.ethereum.request({ method: "eth_chainId" })
+      const currentChainId = Number.parseInt(currentChainIdHex, 16)
 
-    const eip7702Supported = await this.checkEIP7702Support()
+      console.log(`📍 Current chain ID: ${currentChainId}, Target chain ID: ${targetChainId}`)
 
-    if (!eip7702Supported) {
+      if (currentChainId === targetChainId) {
+        console.log(`✅ Already on correct chain: ${targetChainId}`)
+        return true
+      }
+
+      // Try multiple methods to switch network
+
+      // Method 1: Standard EIP-1193 wallet_switchEthereumChain
+      try {
+        console.log(`🔄 Method 1: Using wallet_switchEthereumChain to switch to chain ${targetChainId}`)
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: `0x${targetChainId.toString(16)}` }],
+        })
+
+        // Verify the switch
+        const newChainIdHex = await window.ethereum.request({ method: "eth_chainId" })
+        const newChainId = Number.parseInt(newChainIdHex, 16)
+
+        if (newChainId === targetChainId) {
+          console.log(`✅ Successfully switched to chain ${targetChainId}`)
+          return true
+        } else {
+          console.log(`⚠️ Chain ID mismatch after switch: expected ${targetChainId}, got ${newChainId}`)
+        }
+      } catch (error) {
+        console.log(`⚠️ Method 1 failed:`, error)
+      }
+
+      // Method 2: Try Ambire Wallet specific method if available
+      if (window.ethereum.isAmbire) {
+        try {
+          console.log(`🔄 Method 2: Using Ambire-specific method to switch to chain ${targetChainId}`)
+          // Note: This is hypothetical - check Ambire docs for actual method
+          await window.ethereum.request({
+            method: "wallet_setNetwork",
+            params: [targetChainId],
+          })
+
+          // Verify the switch
+          const newChainIdHex = await window.ethereum.request({ method: "eth_chainId" })
+          const newChainId = Number.parseInt(newChainIdHex, 16)
+
+          if (newChainId === targetChainId) {
+            console.log(`✅ Successfully switched to chain ${targetChainId} using Ambire method`)
+            return true
+          }
+        } catch (error) {
+          console.log(`⚠️ Method 2 failed:`, error)
+        }
+      }
+
+      // Method 3: Try adding the chain first, then switching
+      try {
+        console.log(`🔄 Method 3: Adding chain ${targetChainId} before switching`)
+
+        // Define chain parameters based on target chain ID
+        let chainParams: any = null
+
+        if (targetChainId === 11155111) {
+          // Sepolia
+          chainParams = {
+            chainId: `0x${targetChainId.toString(16)}`,
+            chainName: "Ethereum Sepolia",
+            nativeCurrency: {
+              name: "Sepolia ETH",
+              symbol: "ETH",
+              decimals: 18,
+            },
+            rpcUrls: ["https://lb.drpc.org/ogrpc?network=sepolia&dkey=Au_X8MHT5km3gTHdk3Zh9IDmb7qePncR8JNRKiqCbUWs"],
+            blockExplorerUrls: ["https://sepolia.etherscan.io"],
+          }
+        }
+
+        if (chainParams) {
+          await window.ethereum.request({
+            method: "wallet_addEthereumChain",
+            params: [chainParams],
+          })
+
+          // Verify the switch
+          const newChainIdHex = await window.ethereum.request({ method: "eth_chainId" })
+          const newChainId = Number.parseInt(newChainIdHex, 16)
+
+          if (newChainId === targetChainId) {
+            console.log(`✅ Successfully added and switched to chain ${targetChainId}`)
+            return true
+          }
+        }
+      } catch (error) {
+        console.log(`⚠️ Method 3 failed:`, error)
+      }
+
+      // If we get here, all methods failed
+      console.error(`❌ All network switch methods failed for chain ${targetChainId}`)
+
+      // Show user instructions
+      const networkName = targetChainId === 11155111 ? "Sepolia" : `Chain ID ${targetChainId}`
+      alert(`Please manually switch your wallet to ${networkName} network before proceeding.`)
+
+      return false
+    } catch (error) {
+      console.error("❌ Error ensuring correct network:", error)
+      return false
+    }
+  }
+
+  /**
+   * Executes the bundle using direct method
+   */
+  async executeEIP7702Bundle(bundle: EIP7702Bundle): Promise<Hash> {
+    if (!this.walletClient) {
+      await this.initializeClients()
+      if (!this.walletClient) {
+        throw new Error("No wallet client available")
+      }
+    }
+
+    console.log(`🚀 Starting bundle execution with ${bundle.transactions.length} transactions`)
+
+    const supportInfo = await this.checkEIP7702Support()
+
+    if (!supportInfo.supported || !supportInfo.contractAddress || !supportInfo.chainId) {
       console.log("⚠️ EIP-7702 not supported, falling back to sequential transactions")
       return await this.executeBatchTransactions(bundle.transactions)
     }
 
+    const pectraContract = supportInfo.contractAddress
+    const chainId = this.targetChainId || supportInfo.chainId
+    const network = NETWORKS[chainId as keyof typeof NETWORKS]
+
     try {
-      console.log("🔄 Executing native EIP-7702 bundle with single signature...")
+      console.log(`🔄 Executing bundle with contract: ${pectraContract}`)
 
       // Get the current account
-      const accounts = await this.ethereum.request({
-        method: "eth_accounts",
-      })
-
-      if (!accounts || accounts.length === 0) {
+      const [account] = await this.walletClient.getAddresses()
+      if (!account) {
         throw new Error("No accounts available. Please connect your wallet.")
       }
 
-      const fromAccount = accounts[0]
-      console.log(`📤 Executing bundle from account: ${fromAccount}`)
+      console.log(`📤 Executing bundle from account: ${account}`)
 
-      // Create the temporary contract for EIP-7702
-      const bundleCalldata = this.createBundleContractBytecode(bundle.transactions)
-
-      // Method 1: Use EIP-7702 with code authorization
-      try {
-        console.log("🔄 Attempting EIP-7702 with code authorization...")
-
-        // First, authorize the bytecode of the temporary contract
-        const authorizationList = [
-          {
-            chainId: "0xaa36a7", // Sepolia chain ID
-            address: fromAccount,
-            nonce: "0x0",
-            code: BUNDLE_CONTRACT_BYTECODE,
-          },
-        ]
-
-        // Create the EIP-7702 transaction with authorization list
-        const eip7702Tx = {
-          from: fromAccount,
-          to: fromAccount, // Call ourselves (now acting as a contract)
-          data: bundleCalldata,
-          value: "0x0",
-          gas: bundle.totalGasEstimate,
-          authorizationList: authorizationList,
-          type: "0x4", // EIP-7702 transaction type
-        }
-
-        console.log("📦 EIP-7702 transaction:", eip7702Tx)
-
-        const result = await this.ethereum.request({
-          method: "eth_sendTransaction",
-          params: [eip7702Tx],
-        })
-
-        console.log(`✅ EIP-7702 bundle executed successfully:`, result)
-        return result
-      } catch (eip7702Error) {
-        console.log(`⚠️ EIP-7702 method failed:`, this.errorToString(eip7702Error))
+      // FORCE network switch - this is critical for correct network execution
+      const networkSwitched = await this.ensureCorrectNetwork(chainId)
+      if (!networkSwitched) {
+        throw new Error(
+          `Please manually switch to ${network?.name || `Chain ID ${chainId}`} in your wallet before proceeding.`,
+        )
       }
 
-      // Method 2: Use experimental bundle methods
-      const bundleMethods = ["eth_sendBundle", "wallet_sendBundle", "pectra_sendBundle", "eth_sendTransactionBundle"]
+      // Reinitialize clients after network switch
+      await this.initializeClients()
 
-      for (const method of bundleMethods) {
-        try {
-          console.log(`🔄 Trying bundle method: ${method}`)
+      // Verify we're on the correct chain after switch
+      const finalChainId = await this.walletClient.getChainId()
+      if (finalChainId !== chainId) {
+        throw new Error(
+          `Network switch verification failed. Expected chain ${chainId}, but got ${finalChainId}. Please manually switch to ${network?.name || `Chain ID ${chainId}`} in your wallet.`,
+        )
+      }
 
-          const bundleParams = {
-            transactions: bundle.transactions.map((tx) => ({
-              from: fromAccount,
-              to: tx.to,
-              data: tx.data,
-              value: tx.value,
-              gas: tx.gasLimit,
-            })),
-            gasLimit: bundle.totalGasEstimate,
-          }
+      console.log(`✅ Confirmed on correct network: ${network?.name || chainId} (Chain ID: ${finalChainId})`)
 
-          const result = await this.ethereum.request({
-            method: method,
-            params: [bundleParams],
-          })
+      // Check and approve tokens if needed
+      console.log(`🔄 Checking and approving tokens if needed...`)
 
-          console.log(`✅ Bundle executed successfully with ${method}:`, result)
-          return result.hash || result.bundleHash || result
-        } catch (methodError) {
-          console.log(`⚠️ Method ${method} failed:`, this.errorToString(methodError))
-          continue
+      for (const tx of bundle.transactions) {
+        // Skip native token transfers
+        if (tx.data === "0x" || tx.data === "") continue
+
+        // Check if this is an ERC20 transfer
+        if (tx.data.startsWith("0xa9059cbb")) {
+          const tokenAddress = tx.to
+          const transferData = tx.data.slice(10) // Remove function selector
+
+          // Extract destination and amount from transfer data
+          const paddedTo = `0x${transferData.slice(0, 64).slice(24)}`
+          const amount = BigInt(`0x${transferData.slice(64)}`)
+
+          console.log(`🔄 Checking ERC20 token ${tokenAddress} for transfer of ${amount} to ${paddedTo}`)
+
+          // Check and approve if needed
+          await this.checkAndApproveERC20(tokenAddress, account, amount, pectraContract)
+        }
+
+        // Check if this is an ERC721 transferFrom
+        else if (tx.data.startsWith("0x23b872dd")) {
+          const tokenAddress = tx.to
+          const transferData = tx.data.slice(10) // Remove function selector
+
+          // Extract from, to, and tokenId from transfer data
+          const paddedFrom = `0x${transferData.slice(0, 64).slice(24)}`
+          const paddedTo = `0x${transferData.slice(64, 128).slice(24)}`
+          const tokenId = BigInt(`0x${transferData.slice(128)}`)
+
+          console.log(
+            `🔄 Checking ERC721 token ${tokenAddress} for transfer of #${tokenId} from ${paddedFrom} to ${paddedTo}`,
+          )
+
+          // Check and approve if needed
+          await this.checkAndApproveERC721(tokenAddress, account, tokenId, pectraContract)
         }
       }
 
-      // Method 3: Multicall contract (if available)
-      try {
-        console.log("🔄 Attempting multicall contract...")
+      // Prepare the batch call data for the Pectra contract
+      const targets = bundle.transactions.map((tx) => tx.to as Address)
+      const values = bundle.transactions.map((tx) => BigInt(tx.value || "0"))
+      const calldatas = bundle.transactions.map((tx) => tx.data as `0x${string}`)
 
-        // Address of the Multicall3 contract on Sepolia
-        const multicallAddress = "0xcA11bde05977b3631167028862bE2a173976CA11"
+      console.log(`📤 Bundle targets:`, targets)
+      console.log(
+        `📤 Bundle values:`,
+        values.map((v) => v.toString()),
+      )
+      console.log(`📤 Sending to Pectra contract: ${pectraContract}`)
+      console.log(`📤 From account: ${account}`)
 
-        const multicallData = this.encodeMulticall(bundle.transactions)
+      // Verificar si hay suficiente ETH para la transacción
+      const totalValue = values.reduce((sum, val) => sum + val, BigInt(0))
+      console.log(`💰 Total value being sent: ${totalValue} wei`)
 
-        const multicallTx = {
-          from: fromAccount,
-          to: multicallAddress,
-          data: multicallData,
-          value: "0x0",
-          gas: bundle.totalGasEstimate,
-        }
+      // Aumentar el gas limit para asegurar que hay suficiente
+      const gasLimit = BigInt(bundle.totalGasEstimate) * BigInt(2)
+      console.log(`⛽ Using increased gas limit: ${gasLimit}`)
 
-        const result = await this.ethereum.request({
-          method: "eth_sendTransaction",
-          params: [multicallTx],
-        })
+      // Enviar la transacción directamente al contrato Pectra
+      const hash = await this.walletClient.writeContract({
+        address: pectraContract,
+        abi: PECTRA_BUNDLE_ABI,
+        functionName: "executeBatch",
+        args: [targets, values, calldatas],
+        value: totalValue,
+        gas: gasLimit,
+        account,
+      })
 
-        console.log(`✅ Multicall executed successfully:`, result)
-        return result
-      } catch (multicallError) {
-        console.log(`⚠️ Multicall failed:`, this.errorToString(multicallError))
+      console.log(`✅ Transaction sent successfully:`, hash)
+
+      // Wait for transaction receipt to verify success
+      console.log(`⏳ Waiting for transaction to be mined...`)
+      const receipt = await this.publicClient?.waitForTransactionReceipt({ hash })
+
+      console.log(`📝 Transaction receipt:`, receipt)
+
+      if (receipt?.status === "success") {
+        console.log(`✅ Transaction executed successfully!`)
+      } else {
+        console.error(`❌ Transaction failed!`)
+        throw new Error("Transaction failed on-chain. Check the transaction on the block explorer for more details.")
       }
 
-      // If everything fails, use fallback
-      console.log("🔄 All EIP-7702 methods failed, using fallback")
-      return await this.executeBatchTransactions(bundle.transactions)
+      return hash
     } catch (error) {
       const errorMsg = this.errorToString(error)
-      console.error("❌ EIP-7702 bundle execution failed:", errorMsg)
-      throw new Error(`EIP-7702 bundle execution failed: ${errorMsg}`)
+      console.error("❌ Bundle execution failed:", errorMsg)
+
+      // Mostrar información detallada del error para diagnóstico
+      console.error("Error details:", JSON.stringify(error, null, 2))
+
+      // Intentar extraer más información del error
+      if (typeof error === "object" && error !== null) {
+        console.error("Error code:", (error as any).code)
+        console.error("Error data:", (error as any).data)
+        console.error("Error message:", (error as any).message)
+      }
+
+      throw new Error(`Transaction failed: ${errorMsg}. Please check your wallet balance and try again.`)
     }
   }
 
   /**
-   * Encodes a multicall
+   * Executes multiple transactions sequentially using Viem (fallback)
    */
-  private encodeMulticall(transactions: EIP7702Transaction[]): string {
-    // Multicall3.aggregate3 function selector
-    const multicallSelector = "0x82ad56cb"
+  private async executeBatchTransactions(transactions: EIP7702Transaction[]): Promise<Hash> {
+    if (!this.walletClient) {
+      await this.initializeClients()
+      if (!this.walletClient) {
+        throw new Error("No wallet client available")
+      }
+    }
 
-    // Encode array of Call3 structs
-    let calldata = multicallSelector
+    console.log(`🔄 Executing ${transactions.length} transactions sequentially with Viem (fallback mode)`)
 
-    // Offset to calls array
-    calldata += "0000000000000000000000000000000000000000000000000000000000000020"
+    // Añadir logging de las direcciones de destino:
+    console.log(
+      `📋 Fallback transaction destinations:`,
+      transactions.map((tx) => tx.to),
+    )
 
-    // Array length
-    calldata += transactions.length.toString(16).padStart(64, "0")
+    // Ensure we're on the correct network for fallback mode too
+    const chainId = this.targetChainId || this.currentChain?.id || 11155111 // Default to Sepolia
 
-    // Each Call3 struct: (address target, bool allowFailure, bytes callData)
-    transactions.forEach((tx) => {
-      // target address
-      calldata += tx.to.slice(2).padStart(64, "0")
-      // allowFailure = false
-      calldata += "0000000000000000000000000000000000000000000000000000000000000000"
-      // offset to callData
-      calldata += "0000000000000000000000000000000000000000000000000000000000000060"
-      // callData length
-      const dataLength = (tx.data.length - 2) / 2
-      calldata += dataLength.toString(16).padStart(64, "0")
-      // callData
-      calldata += tx.data.slice(2)
-      // Pad to 32 bytes
-      const padding = (32 - (dataLength % 32)) % 32
-      calldata += "0".repeat(padding * 2)
-    })
+    // Try to switch to the correct network
+    const networkSwitched = await this.ensureCorrectNetwork(chainId)
+    if (!networkSwitched) {
+      const networkName = chainId === 11155111 ? "Sepolia" : `Chain ID ${chainId}`
+      throw new Error(`Please manually switch to ${networkName} in your wallet before proceeding.`)
+    }
 
-    return calldata
-  }
+    // Reinitialize clients after network switch
+    await this.initializeClients()
 
-  /**
-   * Executes multiple transactions sequentially (fallback)
-   */
-  private async executeBatchTransactions(transactions: EIP7702Transaction[]): Promise<string> {
-    console.log(`🔄 Executing ${transactions.length} transactions sequentially (fallback mode)`)
-
-    const accounts = await this.ethereum.request({
-      method: "eth_accounts",
-    })
-
-    if (!accounts || accounts.length === 0) {
+    const [account] = await this.walletClient.getAddresses()
+    if (!account) {
       throw new Error("No accounts available. Please connect your wallet.")
     }
 
-    const fromAccount = accounts[0]
-    console.log(`📤 Sending from account: ${fromAccount}`)
+    console.log(`📤 Sending from account: ${account} on chain: ${chainId}`)
 
-    const txHashes: string[] = []
+    const txHashes: Hash[] = []
 
     for (let i = 0; i < transactions.length; i++) {
       const tx = transactions[i]
@@ -498,21 +888,34 @@ export class EIP7702BundleManager {
       try {
         console.log(`📤 Sending transaction ${i + 1}/${transactions.length}`)
 
-        const txParams = {
-          from: fromAccount,
-          to: tx.to,
-          data: tx.data,
-          value: tx.value,
-          gas: tx.gasLimit,
-        }
+        // Aumentar el gas limit para cada transacción individual
+        const gasLimit = tx.gasLimit ? BigInt(tx.gasLimit) * BigInt(2) : BigInt(100000)
+        console.log(`⛽ Using increased gas limit for transaction ${i + 1}: ${gasLimit}`)
 
-        const txHash = await this.ethereum.request({
-          method: "eth_sendTransaction",
-          params: [txParams],
+        const hash = await this.walletClient.sendTransaction({
+          account,
+          chain: this.currentChain, // Explicitly provide chain
+          to: tx.to as Address,
+          data: tx.data as `0x${string}`,
+          value: BigInt(tx.value || "0"),
+          gas: gasLimit,
         })
 
-        txHashes.push(txHash)
-        console.log(`✅ Transaction ${i + 1} sent: ${txHash}`)
+        txHashes.push(hash)
+        console.log(`✅ Transaction ${i + 1} sent: ${hash}`)
+
+        // Wait for transaction to be mined
+        console.log(`⏳ Waiting for transaction ${i + 1} to be mined...`)
+        const receipt = await this.publicClient?.waitForTransactionReceipt({ hash })
+
+        if (receipt?.status === "success") {
+          console.log(`✅ Transaction ${i + 1} executed successfully!`)
+        } else {
+          console.error(`❌ Transaction ${i + 1} failed!`)
+          throw new Error(
+            `Transaction ${i + 1} failed on-chain. Check the transaction on the block explorer for more details.`,
+          )
+        }
 
         if (i < transactions.length - 1) {
           await new Promise((resolve) => setTimeout(resolve, 1000))
@@ -524,46 +927,147 @@ export class EIP7702BundleManager {
       }
     }
 
-    console.log(`✅ All ${transactions.length} transactions sent successfully`)
+    console.log(`✅ All ${transactions.length} transactions sent successfully with Viem`)
     return txHashes[0]
   }
 
   /**
-   * Gets the current gas price
+   * Gets the current gas price using Viem's public client with fallbacks
    */
   async getCurrentGasPrice(): Promise<bigint> {
-    try {
-      console.log("⛽ Getting current gas price...")
-      const gasPrice = await this.ethereum.request({
-        method: "eth_gasPrice",
-        params: [],
-      })
-      const gasPriceBigInt = BigInt(gasPrice)
-      console.log(`⛽ Current gas price: ${gasPriceBigInt} wei`)
-      return gasPriceBigInt
-    } catch (error) {
-      const errorMsg = this.errorToString(error)
-      console.error("❌ Failed to get gas price:", errorMsg)
-      const defaultGasPrice = BigInt("20000000000") // 20 gwei by default
-      console.log(`🔄 Using default gas price: ${defaultGasPrice} wei`)
-      return defaultGasPrice
+    console.log("⛽ Getting current gas price...")
+
+    // Try multiple methods in order of preference
+    const methods = [
+      () => this.getGasPriceFromViem(),
+      () => this.getGasPriceFromEthereum(),
+      () => this.getGasPriceFromMultipleRPCs(),
+    ]
+
+    for (const method of methods) {
+      try {
+        const gasPrice = await method()
+        if (gasPrice > 0n) {
+          console.log(`✅ Gas price obtained: ${gasPrice} wei (${Number(gasPrice) / 1e9} gwei)`)
+          return gasPrice
+        }
+      } catch (error) {
+        console.log(`⚠️ Gas price method failed:`, this.errorToString(error))
+        continue
+      }
     }
+
+    // Final fallback
+    const defaultGasPrice = BigInt("20000000000") // 20 gwei
+    console.log(`🔄 Using default gas price: ${defaultGasPrice} wei (20 gwei)`)
+    return defaultGasPrice
   }
 
   /**
-   * Calculates the estimated cost in ETH
+   * Get gas price from Viem public client
+   */
+  private async getGasPriceFromViem(): Promise<bigint> {
+    if (!this.publicClient) {
+      await this.initializeClients()
+      if (!this.publicClient) {
+        throw new Error("No public client available")
+      }
+    }
+
+    console.log("⛽ Trying Viem public client...")
+    const gasPrice = await Promise.race([
+      this.publicClient.getGasPrice(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Viem timeout")), 5000)),
+    ])
+
+    return gasPrice
+  }
+
+  /**
+   * Get gas price from window.ethereum
+   */
+  private async getGasPriceFromEthereum(): Promise<bigint> {
+    if (typeof window === "undefined" || !window.ethereum) {
+      throw new Error("No window.ethereum available")
+    }
+
+    console.log("⛽ Trying window.ethereum...")
+    const gasPriceHex = await Promise.race([
+      window.ethereum.request({ method: "eth_gasPrice" }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Ethereum timeout")), 5000)),
+    ])
+
+    return BigInt(gasPriceHex)
+  }
+
+  /**
+   * Get gas price from multiple RPC endpoints
+   */
+  private async getGasPriceFromMultipleRPCs(): Promise<bigint> {
+    const chainId = this.currentChain?.id || 11155111
+    const rpcUrls = RPC_URLS[chainId] || RPC_URLS[11155111]
+
+    console.log(`⛽ Trying multiple RPC endpoints for chain ${chainId}...`)
+
+    for (const rpcUrl of rpcUrls) {
+      try {
+        console.log(`🔄 Trying RPC: ${rpcUrl}`)
+
+        const response = await Promise.race([
+          fetch(rpcUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              method: "eth_gasPrice",
+              params: [],
+              id: 1,
+            }),
+          }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("RPC timeout")), 5000)),
+        ])
+
+        if (response.ok) {
+          const data = await response.json()
+          if (data.result) {
+            const gasPrice = BigInt(data.result)
+            console.log(`✅ Got gas price from ${rpcUrl}: ${gasPrice} wei`)
+            return gasPrice
+          }
+        }
+      } catch (error) {
+        console.log(`⚠️ RPC ${rpcUrl} failed:`, this.errorToString(error))
+        continue
+      }
+    }
+
+    throw new Error("All RPC endpoints failed")
+  }
+
+  /**
+   * Calculates the estimated cost in ETH using Viem
    */
   async calculateEstimatedCost(totalGas: bigint): Promise<string> {
     try {
+      console.log(`💰 Calculating estimated cost for ${totalGas} gas...`)
+
       const gasPrice = await this.getCurrentGasPrice()
+      console.log(`⛽ Got gas price: ${gasPrice} wei`)
+
       const totalCostWei = totalGas * gasPrice
       const totalCostEth = Number(totalCostWei) / Math.pow(10, 18)
-      console.log(`💰 Estimated cost: ${totalCostEth} ETH (${totalCostWei} wei)`)
+
+      console.log(`💰 Estimated cost calculation:`)
+      console.log(`   Gas: ${totalGas}`)
+      console.log(`   Gas Price: ${gasPrice} wei`)
+      console.log(`   Total Cost: ${totalCostWei} wei = ${totalCostEth} ETH`)
+
       return totalCostEth.toFixed(6)
     } catch (error) {
       const errorMsg = this.errorToString(error)
       console.error("❌ Failed to calculate estimated cost:", errorMsg)
-      return "0.000000"
+      console.log("🔄 Returning default cost estimate")
+      return "0.001000" // Return a reasonable default instead of 0
     }
   }
 
