@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { Wallet, Loader2, AlertCircle, Send, CheckCircle2, Eye, X, Shield, Zap } from "lucide-react"
+import { Wallet, Loader2, AlertCircle, Send, CheckCircle2, Eye, Shield, Zap } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -11,7 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Checkbox } from "@/components/ui/checkbox"
 import type { Network } from "@/components/network-selector"
 import { TransactionPreview } from "@/components/transaction-preview"
-import { ScamWarning, ScamTokenBadge } from "@/components/scam-warning"
+import { ScamWarning } from "@/components/scam-warning"
 import type { PectraBundle } from "@/utils/pectra-bundle"
 import { ScamDetector, type Token } from "@/utils/scam-detection"
 import { getTokenBalance } from "@/utils/token-balance"
@@ -20,6 +20,50 @@ import { EIP7702BundleManager, type EIP7702Bundle } from "@/utils/eip7702-bundle
 import { WalletConnection } from "@/components/wallet-connection"
 // Añadir la importación de NetworkSelector que también falta
 import { NetworkSelector } from "@/components/network-selector"
+// Importar el nuevo componente de header
+import { AppHeader } from "@/components/app-header"
+
+// Mover esta definición al inicio del archivo, después de las importaciones
+const NETWORKS = [
+  {
+    id: "sepolia",
+    name: "Ethereum Sepolia (EIP-7702 Ready)",
+    endpoint: "https://eth-sepolia.blockscout.com/api",
+    chainId: 11155111,
+    rpcUrl: "https://lb.drpc.org/ogrpc?network=sepolia&dkey=Au_X8MHT5km3gTHdk3Zh9IDmb7qePncR8JNRKiqCbUWs",
+    blockExplorer: "https://sepolia.etherscan.io",
+    eip7702Supported: true,
+  },
+  {
+    id: "ethereum",
+    name: "Ethereum Mainnet",
+    endpoint: "https://eth.blockscout.com/api",
+    chainId: 1,
+    eip7702Supported: false,
+  },
+  {
+    id: "flow",
+    name: "Flow EVM",
+    endpoint: "https://evm.flowscan.io/api",
+    chainId: 747,
+    rpcUrl: "https://mainnet.evm.nodes.onflow.org",
+    blockExplorer: "https://evm.flowscan.io",
+    eip7702Supported: false,
+  },
+]
+
+// RPC URLs with fallbacks for each network
+const NETWORK_RPC_URLS: Record<string, string[]> = {
+  sepolia: [
+    "https://lb.drpc.org/ogrpc?network=sepolia&dkey=Au_X8MHT5km3gTHdk3Zh9IDmb7qePncR8JNRKiqCbUWs",
+    "https://ethereum-sepolia-rpc.publicnode.com",
+    "https://rpc.sepolia.org",
+    "https://sepolia.infura.io/v3/9aa3d95b3bc440fa88ea12eaa4456161",
+    "https://rpc2.sepolia.org",
+  ],
+  ethereum: ["https://eth.llamarpc.com", "https://rpc.ankr.com/eth", "https://ethereum.publicnode.com"],
+  flow: ["https://mainnet.evm.nodes.onflow.org"],
+}
 
 // Actualizar NATIVE_TOKENS para incluir Sepolia
 const NATIVE_TOKENS: Record<string, Omit<Token, "balance" | "selected">> = {
@@ -119,6 +163,22 @@ const POLYGON_KNOWN_TOKENS = {
   },
 }
 
+// Agregar tokens conocidos de Flow EVM
+const FLOW_KNOWN_TOKENS = {
+  // Token 1
+  "0x2aabea2058b5ac2d339b163c6ab6f2b6d53aabed": {
+    name: "Flow Token 1",
+    symbol: "FT1",
+    decimals: 18,
+  },
+  // Token 2
+  "0x7f27352d5f83db87a5a3e00f4b07cc2138d8ee52": {
+    name: "Flow Token 2",
+    symbol: "FT2",
+    decimals: 18,
+  },
+}
+
 // Función para generar un ID único para cada token
 const generateTokenId = (token: Omit<Token, "selected">, networkId: string): string => {
   if (token.isNative) {
@@ -138,6 +198,50 @@ const fetchSepoliaTokensDirect = async (address: string, selectedNetwork: Networ
   const tokens: Token[] = []
 
   for (const [tokenAddress, tokenInfo] of Object.entries(SEPOLIA_KNOWN_TOKENS)) {
+    try {
+      console.log(`🪙 Checking ${tokenInfo.symbol} at ${tokenAddress}...`)
+
+      const balanceRaw = await getTokenBalance(address, tokenAddress, selectedNetwork)
+      const balanceFloat = Number.parseFloat(balanceRaw) / Math.pow(10, tokenInfo.decimals)
+
+      console.log(`📊 ${tokenInfo.symbol} balance: ${balanceRaw} raw = ${balanceFloat} ${tokenInfo.symbol}`)
+
+      // Include tokens even with zero balance for debugging, but mark them
+      if (balanceFloat >= 0) {
+        tokens.push({
+          type: "ERC20",
+          name: tokenInfo.name,
+          symbol: tokenInfo.symbol,
+          balance: balanceFloat.toFixed(6),
+          decimals: tokenInfo.decimals,
+          contractAddress: tokenAddress.toLowerCase(),
+          selected: false,
+          isNative: false,
+        })
+
+        if (balanceFloat > 0) {
+          console.log(`✅ Found ${tokenInfo.symbol} with balance: ${balanceFloat}`)
+        } else {
+          console.log(`ℹ️ Found ${tokenInfo.symbol} with zero balance`)
+        }
+      }
+    } catch (error) {
+      console.error(`❌ Error checking ${tokenInfo.symbol}:`, error)
+    }
+  }
+
+  console.log(`✅ Direct RPC check complete: ${tokens.length} tokens found`)
+  return tokens
+}
+
+// Función específica para Flow EVM que verifica tokens conocidos directamente
+const fetchFlowTokensDirect = async (address: string, selectedNetwork: Network): Promise<Token[]> => {
+  console.log("🔍 Fetching Flow EVM tokens directly via RPC...")
+  console.log(`📋 Checking ${Object.keys(FLOW_KNOWN_TOKENS).length} known tokens for address: ${address}`)
+
+  const tokens: Token[] = []
+
+  for (const [tokenAddress, tokenInfo] of Object.entries(FLOW_KNOWN_TOKENS)) {
     try {
       console.log(`🪙 Checking ${tokenInfo.symbol} at ${tokenAddress}...`)
 
@@ -198,15 +302,25 @@ export default function TokenViewer() {
     return /^0x[a-fA-F0-9]{40}$/.test(address)
   }
 
-  // Function to get native token balance using RPC
+  // Function to get native token balance using RPC with multiple fallbacks
   const getNativeTokenBalance = async (address: string, network: Network): Promise<string> => {
-    try {
-      console.log(`🔍 Getting native balance for ${network.name}...`)
+    console.log(`🔍 Getting native balance for ${network.name}...`)
 
-      if (network.id === "flow") {
-        // For Flow EVM, use direct RPC call
-        try {
-          const response = await fetch(network.rpcUrl || "https://mainnet.evm.nodes.onflow.org", {
+    // Get RPC URLs for this network
+    const rpcUrls = NETWORK_RPC_URLS[network.id] || [network.rpcUrl].filter(Boolean)
+
+    if (rpcUrls.length === 0) {
+      console.log(`⚠️ No RPC URLs available for ${network.name}`)
+      return "0"
+    }
+
+    // Try each RPC URL with timeout
+    for (const rpcUrl of rpcUrls) {
+      try {
+        console.log(`🔄 Trying RPC: ${rpcUrl}`)
+
+        const response = await Promise.race([
+          fetch(rpcUrl, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -217,50 +331,67 @@ export default function TokenViewer() {
               params: [address, "latest"],
               id: 1,
             }),
-          })
+          }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("RPC timeout")), 5000)),
+        ])
 
-          if (response.ok) {
-            const data = await response.json()
-            if (data.result) {
-              const balanceInEther = Number.parseInt(data.result, 16) / Math.pow(10, 18)
-              console.log(`✅ Flow native balance: ${balanceInEther} FLOW`)
-              return balanceInEther.toFixed(6)
+        if (response.ok) {
+          const data = await response.json()
+          if (data.result) {
+            const balanceInEther = Number.parseInt(data.result, 16) / Math.pow(10, 18)
+            console.log(
+              `✅ ${network.name} balance from ${rpcUrl}: ${balanceInEther} ${NATIVE_TOKENS[network.id]?.symbol}`,
+            )
+            return balanceInEther.toFixed(6)
+          }
+        } else {
+          console.log(`⚠️ RPC ${rpcUrl} returned status: ${response.status}`)
+        }
+      } catch (error) {
+        console.log(`⚠️ RPC ${rpcUrl} failed:`, error)
+        continue
+      }
+    }
+
+    // If all RPC calls fail, try MetaMask as fallback for supported networks
+    if (network.id !== "flow") {
+      try {
+        console.log(`🔄 Trying MetaMask fallback for ${network.name}...`)
+
+        if (typeof window !== "undefined" && window.ethereum) {
+          // Try to switch to the correct network
+          try {
+            await window.ethereum.request({
+              method: "wallet_switchEthereumChain",
+              params: [{ chainId: `0x${network.chainId.toString(16)}` }],
+            })
+          } catch (switchError: any) {
+            if (switchError.code === 4902) {
+              console.log(`Network ${network.name} not available in wallet`)
             }
           }
-        } catch (flowError) {
-          console.log("⚠️ Flow RPC call failed:", flowError)
-        }
-        return "0"
-      } else {
-        // For other networks, use MetaMask
-        if (typeof window === "undefined" || !window.ethereum) {
-          return "0"
-        }
 
-        try {
-          await window.ethereum.request({
-            method: "wallet_switchEthereumChain",
-            params: [{ chainId: `0x${network.chainId.toString(16)}` }],
-          })
-        } catch (switchError: any) {
-          if (switchError.code === 4902) {
-            console.log(`Network ${network.name} not available in wallet`)
-          }
+          const balance = await Promise.race([
+            window.ethereum.request({
+              method: "eth_getBalance",
+              params: [address, "latest"],
+            }),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error("MetaMask timeout")), 5000)),
+          ])
+
+          const balanceInEther = Number.parseInt(balance, 16) / Math.pow(10, 18)
+          console.log(
+            `✅ ${network.name} balance from MetaMask: ${balanceInEther} ${NATIVE_TOKENS[network.id]?.symbol}`,
+          )
+          return balanceInEther.toFixed(6)
         }
-
-        const balance = await window.ethereum.request({
-          method: "eth_getBalance",
-          params: [address, "latest"],
-        })
-
-        const balanceInEther = Number.parseInt(balance, 16) / Math.pow(10, 18)
-        console.log(`✅ ${network.name} balance: ${balanceInEther} ${NATIVE_TOKENS[network.id]?.symbol}`)
-        return balanceInEther.toFixed(6)
+      } catch (metamaskError) {
+        console.error(`❌ MetaMask fallback failed for ${network.name}:`, metamaskError)
       }
-    } catch (error) {
-      console.error(`❌ Error fetching native balance for ${network.name}:`, error)
-      return "0"
     }
+
+    console.error(`❌ All methods failed for fetching native balance on ${network.name}`)
+    return "0"
   }
 
   const fetchWithRetry = async (url: string, maxRetries = 3, baseDelay = 1000): Promise<Response> => {
@@ -510,6 +641,79 @@ export default function TokenViewer() {
       const finalTokens = Array.from(uniqueTokens.values()).filter((token) => Number.parseFloat(token.balance) > 0)
 
       console.log(`✅ Final Polygon tokens (with balance > 0): ${finalTokens.length}`)
+      console.log(
+        `📋 Tokens found:`,
+        finalTokens.map((t) => `${t.symbol}: ${t.balance}`),
+      )
+
+      return finalTokens
+    }
+
+    // Para Flow EVM, usar método directo similar a Sepolia y Polygon
+    if (network.id === "flow") {
+      console.log("🔄 Using direct method for Flow EVM...")
+
+      // Método 1: Tokens conocidos via RPC directo
+      const directTokens = await fetchFlowTokensDirect(address, network)
+
+      // Método 2: Blockscout API como fallback
+      let apiTokens: Token[] = []
+      try {
+        const blockscoutBaseUrl = network.endpoint
+        console.log(`🔗 Fetching from Blockscout: ${blockscoutBaseUrl}`)
+
+        const response = await fetchWithRetry(
+          `${blockscoutBaseUrl}?module=account&action=tokenlist&address=${address}&apikey=${BLOCKSCOUT_API_KEY}`,
+        )
+
+        if (response.ok) {
+          const data = await response.json()
+          console.log(`📊 Flow EVM Blockscout API response:`, data)
+
+          if (data.status === "1" && data.result && Array.isArray(data.result)) {
+            apiTokens = data.result
+              .map((token: any) => {
+                const isERC721 = token.type === "ERC-721" || token.tokenID !== undefined
+
+                return {
+                  type: isERC721 ? ("ERC721" as const) : ("ERC20" as const),
+                  name: token.name || "Unknown Token",
+                  symbol: token.symbol || "???",
+                  balance: isERC721 ? "1" : formatTokenBalance(token.balance, token.decimals),
+                  decimals: isERC721 ? undefined : Number.parseInt(token.decimals) || 18,
+                  tokenId: isERC721 ? token.tokenID : undefined,
+                  contractAddress: token.contractAddress?.toLowerCase(),
+                  selected: false,
+                  isNative: false,
+                }
+              })
+              .filter((token) => token.contractAddress)
+
+            console.log(`✅ Found ${apiTokens.length} tokens via Flow EVM Blockscout API`)
+          }
+        }
+      } catch (apiError) {
+        console.error("❌ Flow EVM Blockscout API failed:", apiError)
+      }
+
+      // Combinar resultados, priorizando tokens con balance > 0
+      const allTokens = [...directTokens, ...apiTokens]
+      const uniqueTokens = new Map<string, Token>()
+
+      allTokens.forEach((token) => {
+        const key = token.contractAddress.toLowerCase()
+        const existingToken = uniqueTokens.get(key)
+
+        // Priorizar tokens con balance > 0, o si no existe uno previo
+        if (!existingToken || Number.parseFloat(token.balance) > Number.parseFloat(existingToken.balance)) {
+          uniqueTokens.set(key, token)
+        }
+      })
+
+      // Filtrar solo tokens con balance > 0 para el resultado final
+      const finalTokens = Array.from(uniqueTokens.values()).filter((token) => Number.parseFloat(token.balance) > 0)
+
+      console.log(`✅ Final Flow EVM tokens (with balance > 0): ${finalTokens.length}`)
       console.log(
         `📋 Tokens found:`,
         finalTokens.map((t) => `${t.symbol}: ${t.balance}`),
@@ -820,17 +1024,26 @@ export default function TokenViewer() {
 
     try {
       setError(null)
+      console.log("🔄 Starting bundle preview preparation...")
 
       // Preparar las transacciones bundled
+      console.log("📋 Preparing bundled transactions...")
       const transactions = bundleManager.prepareBundledTransactions(
         selectedTokens,
         connectedAddress,
         destinationAddress,
       )
+      console.log(`✅ Prepared ${transactions.length} transactions`)
 
       // Estimar gas
+      console.log("⛽ Estimating gas for bundle...")
       const totalGas = await bundleManager.estimateGasForBundle(transactions)
+      console.log(`✅ Gas estimated: ${totalGas}`)
+
+      // Calcular costo estimado
+      console.log("💰 Calculating estimated cost...")
       const estimatedCost = await bundleManager.calculateEstimatedCost(totalGas)
+      console.log(`✅ Cost estimated: ${estimatedCost} ETH`)
 
       const bundle: PectraBundle = {
         transactions,
@@ -838,11 +1051,17 @@ export default function TokenViewer() {
         estimatedCost,
       }
 
+      console.log("✅ Bundle preview prepared successfully:", bundle)
       setBundlePreview(bundle)
       setShowPreview(true)
     } catch (err) {
-      console.error("Error preparing bundle:", err)
-      setError(err instanceof Error ? err.message : "Failed to prepare bundle")
+      console.error("❌ Error preparing bundle:", err)
+      const errorMessage = err instanceof Error ? err.message : "Failed to prepare bundle"
+      setError(`Bundle preparation failed: ${errorMessage}`)
+
+      // Reset preview state on error
+      setBundlePreview(null)
+      setShowPreview(false)
     }
   }
 
@@ -850,15 +1069,30 @@ export default function TokenViewer() {
   useEffect(() => {
     const checkSupport = async () => {
       if (selectedNetwork.eip7702Supported) {
-        const supported = await bundleManager.checkEIP7702Support()
-        setIsEIP7702Supported(supported)
-        console.log(`🔍 EIP-7702 support: ${supported}`)
+        const supportInfo = await bundleManager.checkEIP7702Support()
+        setIsEIP7702Supported(supportInfo.supported)
+        console.log(`🔍 EIP-7702 support: ${supportInfo.supported}`)
+        if (supportInfo.contractAddress) {
+          console.log(`📋 Using Pectra contract: ${supportInfo.contractAddress}`)
+        }
       } else {
         setIsEIP7702Supported(false)
       }
     }
 
     checkSupport()
+  }, [selectedNetwork, bundleManager])
+
+  // Actualizar solo la parte relevante del archivo para establecer el targetChainId
+
+  // En la función TokenViewer, añadir este useEffect:
+
+  useEffect(() => {
+    // Cuando cambia la red seleccionada, actualizar el targetChainId en el bundleManager
+    if (bundleManager && selectedNetwork) {
+      bundleManager.setTargetChainId(selectedNetwork.chainId)
+      console.log(`🎯 Set target chain ID to ${selectedNetwork.chainId} (${selectedNetwork.name})`)
+    }
   }, [selectedNetwork, bundleManager])
 
   const handleExecuteBundle = async () => {
@@ -888,7 +1122,7 @@ export default function TokenViewer() {
     setError(null)
 
     try {
-      console.log("🚀 Executing bundle...")
+      console.log("🚀 Executing bundle with Viem...")
 
       const txHash = await bundleManager.executeEIP7702Bundle(bundlePreview)
 
@@ -920,263 +1154,263 @@ export default function TokenViewer() {
   }
 
   return (
-    <div className="container max-w-3xl py-10 px-4 mx-auto">
-      <Card className="border-neutral-200 shadow-sm">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Wallet className="h-5 w-5" />
-            Ethereum Token Migration (EIP-7702 Pectra)
-            {isEIP7702Supported && <Zap className="h-5 w-5 text-yellow-500" />}
-          </CardTitle>
-          <CardDescription>
-            Connect your wallet to view tokens and migrate them using EIP-7702 atomic bundles
-            {isEIP7702Supported && " - Single signature, atomic execution enabled!"}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            {/* Componente de conexión de wallet - DEBE estar aquí */}
-            <WalletConnection onAddressChange={setConnectedAddress} />
+    <div className="bg-gray-50 min-h-screen">
+      <AppHeader />
 
-            {/* Selector de red */}
-            <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
-              <div className="flex-1">
-                <label className="text-sm font-medium mb-2 block">Network</label>
-                <NetworkSelector
-                  selectedNetwork={selectedNetwork}
-                  onNetworkChange={setSelectedNetwork}
-                  tokenCounts={tokenCountsByNetwork}
-                  isLoadingTokens={isLoading || isLoadingTokenCounts}
-                />
-              </div>
-            </div>
-          </div>
+      <div className="container max-w-3xl py-6 px-4 mx-auto">
+        <Card className="border-neutral-200 shadow-sm">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Wallet className="h-5 w-5" />
+              Token Migration Tool
+              {isEIP7702Supported && <Zap className="h-5 w-5 text-yellow-500" />}
+            </CardTitle>
+            <CardDescription>
+              Connect your wallet to view tokens and migrate them using EIP-7702 atomic bundles
+              {isEIP7702Supported && " - Single signature, atomic execution enabled!"}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              {/* Componente de conexión de wallet - DEBE estar aquí */}
+              <WalletConnection onAddressChange={setConnectedAddress} />
 
-          {/* EIP-7702 Status Alert */}
-          {selectedNetwork.eip7702Supported && (
-            <Alert
-              className={`mt-4 ${isEIP7702Supported ? "border-green-200 bg-green-50" : "border-yellow-200 bg-yellow-50"}`}
-            >
-              <Zap className={`h-4 w-4 ${isEIP7702Supported ? "text-green-600" : "text-yellow-600"}`} />
-              <AlertDescription className={isEIP7702Supported ? "text-green-800" : "text-yellow-800"}>
-                {isEIP7702Supported ? (
-                  <>
-                    <strong>EIP-7702 Active:</strong> Atomic bundling enabled! Single signature for all transactions.
-                  </>
-                ) : (
-                  <>
-                    <strong>EIP-7702 Checking:</strong> Verifying atomic bundle support...
-                  </>
-                )}
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {/* Error alert */}
-          {error && (
-            <Alert variant="destructive" className="mt-4">
-              <AlertCircle className="h-4 w-4" />
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          )}
-
-          {/* Scam Warning */}
-          {tokens.length > 0 && scamStats.scam > 0 && (
-            <div className="mt-4">
-              <ScamWarning
-                scamCount={scamStats.scam}
-                totalCount={scamStats.total}
-                scamPercentage={scamStats.scamPercentage}
-              />
-            </div>
-          )}
-
-          {isLoading && (
-            <div className="mt-6 flex flex-col items-center justify-center py-10 space-y-2">
-              <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
-              <span className="text-sm text-neutral-600">
-                Cargando tokens de {connectedAddress.substring(0, 6)}...{connectedAddress.substring(38)} en{" "}
-                {selectedNetwork.name}
-              </span>
-            </div>
-          )}
-
-          {tokens.length > 0 && (
-            <div className="mt-6 space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-lg font-semibold">Select Tokens to Transfer</h3>
-                <div className="flex items-center gap-2">
-                  <Checkbox
-                    id="select-all"
-                    checked={tokens.every((token) => token.selected)}
-                    onCheckedChange={handleSelectAll}
+              {/* Selector de red */}
+              <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+                <div className="flex-1">
+                  <label className="text-sm font-medium mb-2 block">Network</label>
+                  <NetworkSelector
+                    selectedNetwork={selectedNetwork}
+                    onNetworkChange={setSelectedNetwork}
+                    tokenCounts={tokenCountsByNetwork}
+                    isLoadingTokens={isLoading || isLoadingTokenCounts}
                   />
-                  <label htmlFor="select-all" className="text-sm font-medium">
-                    Select All ({selectedTokens.length}/{tokens.length})
-                  </label>
                 </div>
               </div>
+            </div>
 
-              <Tabs defaultValue="legitimate">
-                <TabsList className="mb-4">
-                  <TabsTrigger value="legitimate" className="flex items-center gap-2">
-                    <Shield className="h-4 w-4" />
-                    Legitimate ({legitimateTokens.length})
-                  </TabsTrigger>
-                  <TabsTrigger value="native">Native</TabsTrigger>
-                  <TabsTrigger value="erc20">ERC-20</TabsTrigger>
-                  <TabsTrigger value="erc721">ERC-721</TabsTrigger>
-                  <TabsTrigger value="scam" className="flex items-center gap-2 text-red-600">
-                    ⚠️ Potential Scams ({scamTokens.length})
-                  </TabsTrigger>
-                </TabsList>
+            {/* EIP-7702 Status Alert */}
+            {selectedNetwork.eip7702Supported && (
+              <Alert
+                className={`mt-4 ${isEIP7702Supported ? "border-green-200 bg-green-50" : "border-yellow-200 bg-yellow-50"}`}
+              >
+                <Zap className={`h-4 w-4 ${isEIP7702Supported ? "text-green-600" : "text-yellow-600"}`} />
+                <AlertDescription className={isEIP7702Supported ? "text-green-800" : "text-yellow-800"}>
+                  {isEIP7702Supported ? (
+                    <>
+                      <strong>EIP-7702 Active:</strong> Atomic bundling enabled! Single signature for all transactions.
+                    </>
+                  ) : (
+                    <>
+                      <strong>EIP-7702 Checking:</strong> Verifying atomic bundle support...
+                    </>
+                  )}
+                </AlertDescription>
+              </Alert>
+            )}
 
-                <TabsContent value="legitimate">
-                  <SelectableTokenList
-                    tokens={legitimateTokens}
-                    onTokenSelection={handleTokenSelection}
-                    networkId={selectedNetwork.id}
-                  />
-                </TabsContent>
+            {/* Error alert */}
+            {error && (
+              <Alert variant="destructive" className="mt-4">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
 
-                <TabsContent value="native">
-                  <SelectableTokenList
-                    tokens={tokens.filter((token) => token.type === "NATIVE")}
-                    onTokenSelection={handleTokenSelection}
-                    networkId={selectedNetwork.id}
-                  />
-                </TabsContent>
+            {/* Scam Warning */}
+            {tokens.length > 0 && scamStats.scam > 0 && (
+              <div className="mt-4">
+                <ScamWarning
+                  scamCount={scamStats.scam}
+                  totalCount={scamStats.total}
+                  scamPercentage={scamStats.scamPercentage}
+                />
+              </div>
+            )}
 
-                <TabsContent value="erc20">
-                  <SelectableTokenList
-                    tokens={tokens.filter((token) => token.type === "ERC20" && !token.isScam)}
-                    onTokenSelection={handleTokenSelection}
-                    networkId={selectedNetwork.id}
-                  />
-                </TabsContent>
+            {isLoading && (
+              <div className="mt-6 flex flex-col items-center justify-center py-10 space-y-2">
+                <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
+                <span className="text-sm text-neutral-600">
+                  Cargando tokens de {connectedAddress.substring(0, 6)}...{connectedAddress.substring(38)} en{" "}
+                  {selectedNetwork.name}
+                </span>
+              </div>
+            )}
 
-                <TabsContent value="erc721">
-                  <SelectableTokenList
-                    tokens={tokens.filter((token) => token.type === "ERC721" && !token.isScam)}
-                    onTokenSelection={handleTokenSelection}
-                    networkId={selectedNetwork.id}
-                  />
-                </TabsContent>
+            {tokens.length > 0 && (
+              <div className="mt-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-semibold">Select Tokens to Transfer</h3>
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="select-all"
+                      checked={tokens.every((token) => token.selected)}
+                      onCheckedChange={handleSelectAll}
+                    />
+                    <label htmlFor="select-all" className="text-sm font-medium">
+                      Select All ({selectedTokens.length}/{tokens.length})
+                    </label>
+                  </div>
+                </div>
 
-                <TabsContent value="scam">
-                  <div className="space-y-3">
-                    <Alert variant="destructive">
-                      <AlertCircle className="h-4 w-4" />
-                      <AlertDescription>
-                        <strong>⚠️ DANGER ZONE:</strong> These tokens are flagged as potential scams. Never interact with
-                        them or visit any links they contain. Transferring these tokens is not recommended.
-                      </AlertDescription>
-                    </Alert>
+                <Tabs defaultValue="legitimate">
+                  <TabsList className="mb-4">
+                    <TabsTrigger value="legitimate" className="flex items-center gap-2">
+                      <Shield className="h-4 w-4" />
+                      Legitimate ({legitimateTokens.length})
+                    </TabsTrigger>
+                    <TabsTrigger value="native">Native</TabsTrigger>
+                    <TabsTrigger value="erc20">ERC-20</TabsTrigger>
+                    <TabsTrigger value="erc721">ERC-721</TabsTrigger>
+                    <TabsTrigger value="scam" className="flex items-center gap-2 text-red-600">
+                      ⚠️ Potential Scams ({scamTokens.length})
+                    </TabsTrigger>
+                  </TabsList>
+
+                  <TabsContent value="legitimate">
                     <SelectableTokenList
-                      tokens={scamTokens}
+                      tokens={legitimateTokens}
                       onTokenSelection={handleTokenSelection}
                       networkId={selectedNetwork.id}
                     />
-                  </div>
-                </TabsContent>
-              </Tabs>
+                  </TabsContent>
 
-              {selectedTokens.length > 0 && !showPreview && (
-                <Card className="border-blue-200 bg-blue-50">
-                  <CardContent className="pt-6">
-                    <div className="space-y-4">
-                      <div className="flex items-center gap-2">
-                        <CheckCircle2 className="h-5 w-5 text-blue-600" />
-                        <span className="font-medium text-blue-800">
-                          {selectedTokens.length} token{selectedTokens.length > 1 ? "s" : ""} selected for transfer
-                        </span>
-                        {selectedTokens.some((token) => token.isScam) && (
-                          <Badge variant="destructive" className="ml-2">
-                            ⚠️ {selectedTokens.filter((token) => token.isScam).length} scam token(s) selected
-                          </Badge>
+                  <TabsContent value="native">
+                    <SelectableTokenList
+                      tokens={tokens.filter((token) => token.type === "NATIVE")}
+                      onTokenSelection={handleTokenSelection}
+                      networkId={selectedNetwork.id}
+                    />
+                  </TabsContent>
+
+                  <TabsContent value="erc20">
+                    <SelectableTokenList
+                      tokens={tokens.filter((token) => token.type === "ERC20" && !token.isScam)}
+                      onTokenSelection={handleTokenSelection}
+                      networkId={selectedNetwork.id}
+                    />
+                  </TabsContent>
+
+                  <TabsContent value="erc721">
+                    <SelectableTokenList
+                      tokens={tokens.filter((token) => token.type === "ERC721" && !token.isScam)}
+                      onTokenSelection={handleTokenSelection}
+                      networkId={selectedNetwork.id}
+                    />
+                  </TabsContent>
+
+                  <TabsContent value="scam">
+                    <div className="space-y-3">
+                      <Alert variant="destructive">
+                        <AlertCircle className="h-4 w-4" />
+                        <AlertDescription>
+                          <strong>⚠️ DANGER ZONE:</strong> These tokens are flagged as potential scams. Never interact
+                          with them or visit any links they contain. Transferring these tokens is not recommended.
+                        </AlertDescription>
+                      </Alert>
+                      <SelectableTokenList
+                        tokens={scamTokens}
+                        onTokenSelection={handleTokenSelection}
+                        networkId={selectedNetwork.id}
+                      />
+                    </div>
+                  </TabsContent>
+                </Tabs>
+
+                {selectedTokens.length > 0 && !showPreview && (
+                  <Card className="border-blue-200 bg-blue-50">
+                    <CardContent className="pt-6">
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-2">
+                          <CheckCircle2 className="h-5 w-5 text-blue-600" />
+                          <span className="font-medium text-blue-800">
+                            {selectedTokens.length} token{selectedTokens.length > 1 ? "s" : ""} selected for transfer
+                          </span>
+                          {selectedTokens.some((token) => token.isScam) && (
+                            <Badge variant="destructive" className="ml-2">
+                              ⚠️ {selectedTokens.filter((token) => token.isScam).length} scam token(s) selected
+                            </Badge>
+                          )}
+                        </div>
+
+                        <div className="space-y-2">
+                          <label htmlFor="destination" className="text-sm font-medium text-blue-800">
+                            Destination Wallet Address
+                          </label>
+                          <Input
+                            id="destination"
+                            placeholder="Enter destination address (0x...)"
+                            value={destinationAddress}
+                            onChange={(e) => setDestinationAddress(e.target.value)}
+                            className="border-blue-300"
+                          />
+                        </div>
+
+                        <Button
+                          onClick={handlePreviewBundle}
+                          disabled={!destinationAddress || selectedTokens.length === 0}
+                          className="w-full"
+                          size="lg"
+                        >
+                          <Eye className="mr-2 h-4 w-4" />
+                          Preview Bundle Transaction
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {showPreview && bundlePreview && (
+                  <div className="space-y-4">
+                    <TransactionPreview
+                      tokens={selectedTokens}
+                      fromAddress={connectedAddress}
+                      toAddress={destinationAddress}
+                      estimatedGas={bundlePreview.totalGasEstimate}
+                      estimatedCost={bundlePreview.estimatedCost}
+                      onConfirm={handleExecuteBundle}
+                      onCancel={() => setShowPreview(false)}
+                      isEIP7702Supported={isEIP7702Supported}
+                    />
+
+                    <div className="flex gap-3">
+                      <Button onClick={handleExecuteBundle} disabled={isTransferring} className="flex-1" size="lg">
+                        {isTransferring ? (
+                          <>
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            {isEIP7702Supported ? "Executing Atomic Bundle..." : "Sending Transactions..."}
+                          </>
+                        ) : (
+                          <>
+                            {isEIP7702Supported ? <Zap className="mr-2 h-4 w-4" /> : <Send className="mr-2 h-4 w-4" />}
+                            {isEIP7702Supported
+                              ? `Execute Atomic Bundle (${selectedTokens.length})`
+                              : `Send Sequential Transactions (${selectedTokens.length})`}
+                          </>
                         )}
-                      </div>
-
-                      <div className="space-y-2">
-                        <label htmlFor="destination" className="text-sm font-medium text-blue-800">
-                          Destination Wallet Address
-                        </label>
-                        <Input
-                          id="destination"
-                          placeholder="Enter destination address (0x...)"
-                          value={destinationAddress}
-                          onChange={(e) => setDestinationAddress(e.target.value)}
-                          className="border-blue-300"
-                        />
-                      </div>
+                      </Button>
 
                       <Button
-                        onClick={handlePreviewBundle}
-                        disabled={!destinationAddress || selectedTokens.length === 0}
-                        className="w-full"
+                        onClick={() => setShowPreview(false)}
+                        variant="outline"
+                        disabled={isTransferring}
                         size="lg"
-                      >
-                        <Eye className="mr-2 h-4 w-4" />
-                        Preview Bundle Transaction
-                      </Button>
+                      />
                     </div>
-                  </CardContent>
-                </Card>
-              )}
-
-              {showPreview && bundlePreview && (
-                <div className="space-y-4">
-                  <TransactionPreview
-                    tokens={selectedTokens}
-                    fromAddress={connectedAddress}
-                    toAddress={destinationAddress}
-                    estimatedGas={bundlePreview.totalGasEstimate}
-                    estimatedCost={bundlePreview.estimatedCost}
-                    onConfirm={handleExecuteBundle}
-                    onCancel={() => setShowPreview(false)}
-                    isEIP7702Supported={isEIP7702Supported}
-                  />
-
-                  <div className="flex gap-3">
-                    <Button onClick={handleExecuteBundle} disabled={isTransferring} className="flex-1" size="lg">
-                      {isTransferring ? (
-                        <>
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          {isEIP7702Supported ? "Executing Atomic Bundle..." : "Sending Transactions..."}
-                        </>
-                      ) : (
-                        <>
-                          {isEIP7702Supported ? <Zap className="mr-2 h-4 w-4" /> : <Send className="mr-2 h-4 w-4" />}
-                          {isEIP7702Supported
-                            ? `Execute Atomic Bundle (${selectedTokens.length})`
-                            : `Send Sequential Transactions (${selectedTokens.length})`}
-                        </>
-                      )}
-                    </Button>
-
-                    <Button onClick={() => setShowPreview(false)} variant="outline" disabled={isTransferring} size="lg">
-                      <X className="mr-2 h-4 w-4" />
-                      Cancel
-                    </Button>
                   </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {!isLoading && tokens.length === 0 && connectedAddress && !error && (
-            <div className="mt-6 text-center py-10 text-neutral-500">No tokens found for this wallet</div>
-          )}
-
-          {!connectedAddress && (
-            <div className="mt-6 text-center py-10 text-neutral-500">
-              Connect your wallet to view and transfer tokens
-            </div>
-          )}
-        </CardContent>
-      </Card>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </div>
   )
+}
+
+// Al final del archivo, después del return statement de TokenViewer, agregar:
+
 }
 
 // Componente corregido para usar IDs únicos
@@ -1190,6 +1424,7 @@ function SelectableTokenList({
   networkId: string
 }) {
   if (tokens.length === 0) {
+    \
     return <div className="text-center py-6 text-neutral-500">No tokens found</div>
   }
 
@@ -1218,7 +1453,19 @@ function SelectableTokenList({
                         Native
                       </Badge>
                     )}
-                    {token.isScam && token.scamReason && <ScamTokenBadge reasons={token.scamReason} />}
+                    {token.isScam && token.scamReason && (
+                      <div className="group relative">
+                        <Badge variant="destructive" className="bg-red-100 text-red-800 border-red-300">
+                          ⚠️ SCAM
+                        </Badge>
+                        <div className="absolute bottom-full left-0 mb-2 hidden group-hover:block z-10 w-64 p-2 bg-red-50 border border-red-200 rounded shadow-lg">
+                          <div className="text-xs text-red-800">
+                            <strong>Potential scam reasons:</strong>
+                            <div className="mt-1">{token.scamReason}</div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                   <div className="text-sm text-neutral-500 mt-1">
                     {token.symbol} •{" "}
@@ -1245,31 +1492,3 @@ function SelectableTokenList({
     </div>
   )
 }
-
-const NETWORKS = [
-  {
-    id: "sepolia",
-    name: "Ethereum Sepolia (EIP-7702 Ready)",
-    endpoint: "https://eth-sepolia.blockscout.com/api",
-    chainId: 11155111,
-    rpcUrl: "https://sepolia.infura.io/v3/",
-    blockExplorer: "https://sepolia.etherscan.io",
-    eip7702Supported: true,
-  },
-  {
-    id: "ethereum",
-    name: "Ethereum Mainnet",
-    endpoint: "https://eth.blockscout.com/api",
-    chainId: 1,
-    eip7702Supported: false,
-  },
-  {
-    id: "flow",
-    name: "Flow EVM",
-    endpoint: "https://evm.flowscan.io/api",
-    chainId: 747,
-    rpcUrl: "https://mainnet.evm.nodes.onflow.org",
-    blockExplorer: "https://evm.flowscan.io",
-    eip7702Supported: false,
-  },
-]
