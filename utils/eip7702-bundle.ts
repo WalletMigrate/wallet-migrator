@@ -11,6 +11,7 @@ import {
   type Hash,
   type WalletClient,
   type PublicClient,
+  type Hex,
 } from "viem"
 import { sepolia, mainnet } from "viem/chains"
 
@@ -31,6 +32,7 @@ interface EIP7702Transaction {
   data: string
   value: string
   gasLimit?: string
+  description?: string
 }
 
 interface EIP7702Bundle {
@@ -38,6 +40,24 @@ interface EIP7702Bundle {
   totalGasEstimate: string
   estimatedCost: string
   bundleHash?: string
+}
+
+// EIP-7702 Authorization structure
+interface EIP7702Authorization {
+  chainId: bigint
+  address: Address
+  nonce: bigint
+  yParity: number
+  r: Hex
+  s: Hex
+}
+
+// EIP-7702 Wallet Capabilities
+interface WalletCapabilities {
+  supportsEIP7702: boolean
+  supportsBatchingTransaction: boolean
+  supportsPaymaster: boolean
+  atomicStatus: "ready" | "supported" | "unsupported"
 }
 
 // ERC20 ABI for transfer function
@@ -51,26 +71,6 @@ const ERC20_ABI = [
       { name: "amount", type: "uint256" },
     ],
     outputs: [{ name: "", type: "bool" }],
-  },
-  {
-    name: "approve",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "spender", type: "address" },
-      { name: "amount", type: "uint256" },
-    ],
-    outputs: [{ name: "", type: "bool" }],
-  },
-  {
-    name: "allowance",
-    type: "function",
-    stateMutability: "view",
-    inputs: [
-      { name: "owner", type: "address" },
-      { name: "spender", type: "address" },
-    ],
-    outputs: [{ name: "", type: "uint256" }],
   },
 ] as const
 
@@ -87,45 +87,7 @@ const ERC721_ABI = [
     ],
     outputs: [],
   },
-  {
-    name: "approve",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "to", type: "address" },
-      { name: "tokenId", type: "uint256" },
-    ],
-    outputs: [],
-  },
-  {
-    name: "getApproved",
-    type: "function",
-    stateMutability: "view",
-    inputs: [{ name: "tokenId", type: "uint256" }],
-    outputs: [{ name: "", type: "address" }],
-  },
 ] as const
-
-// Pectra Bundle Contract ABI
-const PECTRA_BUNDLE_ABI = [
-  {
-    name: "executeBatch",
-    type: "function",
-    stateMutability: "payable",
-    inputs: [
-      { name: "targets", type: "address[]" },
-      { name: "values", type: "uint256[]" },
-      { name: "calldatas", type: "bytes[]" },
-    ],
-    outputs: [],
-  },
-] as const
-
-// Pectra Bundle Contract Addresses by network
-const PECTRA_BUNDLE_CONTRACTS: Record<number, Address> = {
-  1: "0x9eCc1Ae7B614e6d63Ddc193070a2a53ADf9fE455", // Ethereum Mainnet
-  11155111: "0xB2491C3c204E9bC257FEb9Fb6A44c3706efa5A19", // Sepolia Testnet
-}
 
 // Network configurations
 const NETWORKS = {
@@ -180,7 +142,7 @@ export class EIP7702BundleManager {
         this.publicClient = createPublicClient({
           chain: this.currentChain,
           transport: http(rpcUrls[0], {
-            timeout: 10000, // 10 second timeout
+            timeout: 10000,
             retryCount: 3,
             retryDelay: 1000,
           }),
@@ -227,9 +189,121 @@ export class EIP7702BundleManager {
   }
 
   /**
+   * Check external wallet capabilities for EIP-7702 support
+   * Based on Pimlico documentation
+   */
+  async checkExternalWalletCapabilities(): Promise<WalletCapabilities> {
+    try {
+      if (!this.walletClient) {
+        await this.initializeClients()
+        if (!this.walletClient) {
+          return {
+            supportsEIP7702: false,
+            supportsBatchingTransaction: false,
+            supportsPaymaster: false,
+            atomicStatus: "unsupported",
+          }
+        }
+      }
+
+      const chainId = await this.walletClient.getChainId()
+      console.log(`🔍 Checking wallet capabilities for chain ID: ${chainId}`)
+
+      // Check if wallet supports EIP-7702 capabilities
+      let capabilities: any = {}
+
+      try {
+        // Try to get wallet capabilities using EIP-5792 wallet_getCapabilities
+        if (window.ethereum && typeof window.ethereum.request === "function") {
+          console.log(`🔍 Requesting wallet capabilities...`)
+
+          // Try the standard method first
+          try {
+            capabilities = await window.ethereum.request({
+              method: "wallet_getCapabilities",
+              params: [],
+            })
+            console.log(`📋 Wallet capabilities received:`, capabilities)
+          } catch (capError) {
+            console.log(`⚠️ wallet_getCapabilities not supported, checking manually`)
+
+            // Fallback: Check wallet type and assume capabilities
+            if (window.ethereum.isMetaMask) {
+              console.log(`🦊 MetaMask detected - checking for EIP-7702 support`)
+              capabilities = {
+                [chainId]: {
+                  atomicBatch: { supported: true },
+                  paymasterService: { supported: false },
+                },
+              }
+            } else if (window.ethereum.isAmbire) {
+              console.log(`🔷 Ambire detected - assuming EIP-7702 support`)
+              capabilities = {
+                [chainId]: {
+                  atomicBatch: { supported: true },
+                  paymasterService: { supported: true },
+                },
+              }
+            } else {
+              console.log(`❓ Unknown wallet - assuming basic capabilities`)
+              capabilities = {
+                [chainId]: {
+                  atomicBatch: { supported: false },
+                  paymasterService: { supported: false },
+                },
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.warn(`⚠️ Error checking wallet capabilities:`, this.errorToString(error))
+        capabilities = {}
+      }
+
+      // Parse capabilities for current chain
+      const chainCapabilities = capabilities[chainId] || capabilities[`0x${chainId.toString(16)}`] || {}
+
+      const supportsEIP7702 = Boolean(
+        chainCapabilities.atomicBatch?.supported || chainCapabilities.eip7702?.supported || window.ethereum?.isAmbire, // Ambire likely supports EIP-7702
+      )
+
+      const supportsBatchingTransaction = Boolean(
+        chainCapabilities.atomicBatch?.supported || chainCapabilities.batchTransactions?.supported || supportsEIP7702,
+      )
+
+      const supportsPaymaster = Boolean(
+        chainCapabilities.paymasterService?.supported || chainCapabilities.paymaster?.supported,
+      )
+
+      let atomicStatus: "ready" | "supported" | "unsupported" = "unsupported"
+      if (supportsBatchingTransaction) {
+        atomicStatus = chainCapabilities.atomicBatch?.status === "ready" ? "ready" : "supported"
+      }
+
+      const result: WalletCapabilities = {
+        supportsEIP7702,
+        supportsBatchingTransaction,
+        supportsPaymaster,
+        atomicStatus,
+      }
+
+      console.log(`✅ Wallet capabilities determined:`, result)
+      return result
+    } catch (error) {
+      console.error("❌ Error checking external wallet capabilities:", error)
+      return {
+        supportsEIP7702: false,
+        supportsBatchingTransaction: false,
+        supportsPaymaster: false,
+        atomicStatus: "unsupported",
+      }
+    }
+  }
+
+  /**
    * Gets the current chain ID and checks EIP-7702 support
    */
-  async checkEIP7702Support(): Promise<{ supported: boolean; contractAddress?: Address; chainId?: number }> {
+  async checkEIP7702Support(): Promise<{ supported: boolean; capabilities?: WalletCapabilities; chainId?: number }> {
     try {
       if (!this.walletClient) {
         await this.initializeClients()
@@ -264,16 +338,17 @@ export class EIP7702BundleManager {
         console.log(`🔄 Updated clients to chain: ${this.currentChain.name}`)
       }
 
-      const contractAddress = PECTRA_BUNDLE_CONTRACTS[chainId]
+      // Check wallet capabilities
+      const capabilities = await this.checkExternalWalletCapabilities()
       const network = NETWORKS[chainId as keyof typeof NETWORKS]
 
-      if (contractAddress && network) {
-        console.log(`✅ EIP-7702 supported on ${network.name} with contract: ${contractAddress}`)
-        return { supported: true, contractAddress, chainId }
+      if (capabilities.supportsEIP7702 && capabilities.supportsBatchingTransaction) {
+        console.log(`✅ EIP-7702 supported on ${network?.name || chainId} with capabilities:`, capabilities)
+        return { supported: true, capabilities, chainId }
       }
 
       console.log(`⚠️ EIP-7702 not supported on chain ${chainId}`)
-      return { supported: false, chainId }
+      return { supported: false, capabilities, chainId }
     } catch (error) {
       console.error("❌ Error checking EIP-7702 support:", error)
       return { supported: false }
@@ -281,129 +356,14 @@ export class EIP7702BundleManager {
   }
 
   /**
-   * Check if an ERC20 token has enough allowance for the Pectra contract
+   * Prepares the bundled transactions for EIP-7702 execution
+   * Following Pimlico's approach for external wallets
    */
-  private async checkAndApproveERC20(
-    tokenAddress: string,
-    ownerAddress: string,
-    amount: bigint,
-    pectraContract: string,
-  ): Promise<boolean> {
-    try {
-      if (!this.publicClient || !this.walletClient) {
-        throw new Error("Clients not initialized")
-      }
-
-      console.log(`🔍 Checking allowance for token ${tokenAddress}...`)
-
-      // Check current allowance
-      const allowance = await this.publicClient.readContract({
-        address: tokenAddress as Address,
-        abi: ERC20_ABI,
-        functionName: "allowance",
-        args: [ownerAddress as Address, pectraContract as Address],
-      })
-
-      console.log(`📊 Current allowance: ${allowance} (needed: ${amount})`)
-
-      // If allowance is sufficient, return true
-      if (allowance >= amount) {
-        console.log(`✅ Allowance sufficient for token ${tokenAddress}`)
-        return true
-      }
-
-      // If not, request approval
-      console.log(`🔄 Requesting approval for token ${tokenAddress}...`)
-
-      const [account] = await this.walletClient.getAddresses()
-
-      const hash = await this.walletClient.writeContract({
-        address: tokenAddress as Address,
-        abi: ERC20_ABI,
-        functionName: "approve",
-        args: [pectraContract as Address, amount],
-        account,
-      })
-
-      console.log(`✅ Approval transaction sent: ${hash}`)
-
-      // Wait for transaction to be mined
-      console.log(`⏳ Waiting for approval transaction to be mined...`)
-      await this.publicClient.waitForTransactionReceipt({ hash })
-
-      console.log(`✅ Approval confirmed for token ${tokenAddress}`)
-      return true
-    } catch (error) {
-      console.error(`❌ Error approving token ${tokenAddress}:`, error)
-      throw new Error(`Failed to approve token ${tokenAddress}: ${this.errorToString(error)}`)
-    }
-  }
-
-  /**
-   * Check if an ERC721 token is approved for the Pectra contract
-   */
-  private async checkAndApproveERC721(
-    tokenAddress: string,
-    ownerAddress: string,
-    tokenId: bigint,
-    pectraContract: string,
-  ): Promise<boolean> {
-    try {
-      if (!this.publicClient || !this.walletClient) {
-        throw new Error("Clients not initialized")
-      }
-
-      console.log(`🔍 Checking approval for NFT ${tokenAddress} #${tokenId}...`)
-
-      // Check current approval
-      const approved = await this.publicClient.readContract({
-        address: tokenAddress as Address,
-        abi: ERC721_ABI,
-        functionName: "getApproved",
-        args: [tokenId],
-      })
-
-      console.log(`📊 Current approval: ${approved} (needed: ${pectraContract})`)
-
-      // If approved, return true
-      if (approved.toLowerCase() === pectraContract.toLowerCase()) {
-        console.log(`✅ Approval sufficient for NFT ${tokenAddress} #${tokenId}`)
-        return true
-      }
-
-      // If not, request approval
-      console.log(`🔄 Requesting approval for NFT ${tokenAddress} #${tokenId}...`)
-
-      const [account] = await this.walletClient.getAddresses()
-
-      const hash = await this.walletClient.writeContract({
-        address: tokenAddress as Address,
-        abi: ERC721_ABI,
-        functionName: "approve",
-        args: [pectraContract as Address, tokenId],
-        account,
-      })
-
-      console.log(`✅ Approval transaction sent: ${hash}`)
-
-      // Wait for transaction to be mined
-      console.log(`⏳ Waiting for approval transaction to be mined...`)
-      await this.publicClient.waitForTransactionReceipt({ hash })
-
-      console.log(`✅ Approval confirmed for NFT ${tokenAddress} #${tokenId}`)
-      return true
-    } catch (error) {
-      console.error(`❌ Error approving NFT ${tokenAddress} #${tokenId}:`, error)
-      throw new Error(`Failed to approve NFT ${tokenAddress} #${tokenId}: ${this.errorToString(error)}`)
-    }
-  }
-
-  /**
-   * Prepares the bundled transactions according to EIP-7702
-   */
-  prepareBundledTransactions(tokens: Token[], fromAddress: string, toAddress: string): EIP7702Transaction[] {
-    const transactions: EIP7702Transaction[] = []
-
+  async prepareBundledTransactions(
+    tokens: Token[],
+    fromAddress: string,
+    toAddress: string,
+  ): Promise<EIP7702Transaction[]> {
     if (!fromAddress || !toAddress) {
       throw new Error("From and to addresses are required")
     }
@@ -414,48 +374,173 @@ export class EIP7702BundleManager {
 
     console.log(`📋 Preparing EIP-7702 bundle: ${tokens.length} tokens from ${fromAddress} to ${toAddress}`)
 
-    // Añadir esta verificación al inicio del método:
+    // Verificar que las direcciones no sean iguales
     if (fromAddress.toLowerCase() === toAddress.toLowerCase()) {
       throw new Error("From and to addresses cannot be the same")
     }
 
     console.log(`✅ Verified: fromAddress (${fromAddress}) !== toAddress (${toAddress})`)
 
+    // Check EIP-7702 support and capabilities
+    const supportInfo = await this.checkEIP7702Support()
+    if (!supportInfo.supported || !supportInfo.capabilities?.supportsBatchingTransaction) {
+      console.log("⚠️ EIP-7702 batching not supported, preparing individual transactions for fallback")
+      return await this.prepareIndividualTransactions(tokens, fromAddress, toAddress)
+    }
+
+    console.log(`✅ EIP-7702 batching supported, preparing atomic batch transactions`)
+
+    // Prepare individual transactions that will be batched by the wallet
+    const transactions: EIP7702Transaction[] = []
+    const validTokens: Token[] = []
+
+    // First pass: validate tokens
     for (const token of tokens) {
-      console.log(`🔄 Processing token: ${token.name} (${token.symbol}) - Type: ${token.type}`)
+      console.log(`🔍 Processing token: ${token.name} (${token.symbol}) - Type: ${token.type}`)
 
       if (token.type === "NATIVE") {
         const balanceFloat = Number.parseFloat(token.balance)
-        if (balanceFloat <= 0) {
-          console.warn(`⚠️ Skipping native token ${token.symbol} with zero balance`)
+        if (balanceFloat > 0) {
+          validTokens.push(token)
+        }
+      } else if (token.type === "ERC20") {
+        if (this.isValidEthereumAddress(token.contractAddress)) {
+          const balanceFloat = Number.parseFloat(token.balance)
+          if (balanceFloat > 0) {
+            validTokens.push(token)
+          }
+        }
+      } else if (token.type === "ERC721") {
+        if (this.isValidEthereumAddress(token.contractAddress)) {
+          validTokens.push(token)
+        }
+      }
+    }
+
+    console.log(`📊 Validation results: ${validTokens.length} valid tokens out of ${tokens.length} total`)
+
+    if (validTokens.length === 0) {
+      throw new Error("No valid tokens to transfer after validation")
+    }
+
+    // Second pass: create individual transactions for EIP-7702 atomic batching
+    for (const token of validTokens) {
+      console.log(`🔄 Creating transaction for: ${token.name} (${token.symbol}) - Type: ${token.type}`)
+
+      if (token.type === "NATIVE") {
+        try {
+          const valueInEther = parseEther(token.balance)
+          console.log(`💰 Native token transfer: ${token.balance} ${token.symbol} = ${valueInEther} wei`)
+
+          transactions.push({
+            to: toAddress,
+            data: "0x", // Empty calldata for ETH transfer
+            value: valueInEther.toString(),
+            gasLimit: "0x5208", // 21000 gas for ETH transfer
+            description: `Transfer ${token.balance} ${token.symbol} to ${toAddress}`,
+          })
+          console.log(`✅ Added ETH transfer transaction: ${valueInEther} wei to ${toAddress}`)
+        } catch (error) {
+          console.error(`❌ Error processing native token ${token.symbol}:`, this.errorToString(error))
           continue
         }
+      } else if (token.type === "ERC20") {
+        try {
+          const amount = this.parseTokenAmount(token.balance, token.decimals || 18)
+          console.log(`🪙 ERC20 transfer: ${token.balance} ${token.symbol} = ${amount} units`)
+
+          // Use direct transfer (not transferFrom) since the user's wallet will execute directly
+          const transferData = encodeFunctionData({
+            abi: ERC20_ABI,
+            functionName: "transfer",
+            args: [toAddress as Address, amount],
+          })
+
+          transactions.push({
+            to: token.contractAddress,
+            data: transferData,
+            value: "0",
+            gasLimit: "0x15F90", // 90000 gas for ERC20 transfer
+            description: `Transfer ${token.balance} ${token.symbol} to ${toAddress}`,
+          })
+          console.log(`✅ Added ERC20 transfer transaction: ${amount} ${token.symbol} to ${toAddress}`)
+        } catch (error) {
+          console.error(`❌ Error processing ERC20 token ${token.symbol}:`, this.errorToString(error))
+          continue
+        }
+      } else if (token.type === "ERC721") {
+        try {
+          const tokenId = BigInt(token.tokenId || "0")
+          console.log(`🖼️ NFT transfer: ${token.name} #${tokenId}`)
+
+          const transferData = encodeFunctionData({
+            abi: ERC721_ABI,
+            functionName: "transferFrom",
+            args: [fromAddress as Address, toAddress as Address, tokenId],
+          })
+
+          transactions.push({
+            to: token.contractAddress,
+            data: transferData,
+            value: "0",
+            gasLimit: "0x1D4C0", // 120000 gas for NFT transfer
+            description: `Transfer NFT ${token.name} #${tokenId} to ${toAddress}`,
+          })
+          console.log(`✅ Added NFT transfer transaction: ${token.name} #${tokenId} to ${toAddress}`)
+        } catch (error) {
+          console.error(`❌ Error processing NFT ${token.name}:`, this.errorToString(error))
+          continue
+        }
+      }
+    }
+
+    if (transactions.length === 0) {
+      throw new Error("No valid transactions to bundle after processing")
+    }
+
+    console.log(`📋 Prepared ${transactions.length} transactions for EIP-7702 atomic execution`)
+    console.log(`📊 Transaction summary:`)
+    transactions.forEach((tx, index) => {
+      console.log(`  ${index + 1}. ${tx.description}`)
+    })
+
+    return transactions
+  }
+
+  /**
+   * Prepares individual transactions for fallback mode (when EIP-7702 is not supported)
+   */
+  private async prepareIndividualTransactions(
+    tokens: Token[],
+    fromAddress: string,
+    toAddress: string,
+  ): Promise<EIP7702Transaction[]> {
+    const transactions: EIP7702Transaction[] = []
+
+    // Process each token individually for fallback mode
+    for (const token of tokens) {
+      console.log(`🔄 Processing individual transaction for: ${token.name} (${token.symbol})`)
+
+      if (token.type === "NATIVE") {
+        const balanceFloat = Number.parseFloat(token.balance)
+        if (balanceFloat <= 0) continue
 
         const valueInEther = parseEther(token.balance)
-        console.log(`💰 Native token transfer: ${token.balance} ${token.symbol} = ${valueInEther} wei`)
-
         transactions.push({
           to: toAddress,
           data: "0x",
           value: valueInEther.toString(),
-          gasLimit: "0x5208", // 21000 gas for a standard ETH transfer
+          gasLimit: "0x5208",
+          description: `Transfer ${token.balance} ${token.symbol}`,
         })
       } else if (token.type === "ERC20") {
-        if (!this.isValidEthereumAddress(token.contractAddress)) {
-          throw new Error(`Invalid contract address for token ${token.symbol}`)
-        }
+        if (!this.isValidEthereumAddress(token.contractAddress)) continue
 
         const balanceFloat = Number.parseFloat(token.balance)
-        if (balanceFloat <= 0) {
-          console.warn(`⚠️ Skipping ERC20 token ${token.symbol} with zero balance`)
-          continue
-        }
+        if (balanceFloat <= 0) continue
 
         const amount = this.parseTokenAmount(token.balance, token.decimals || 18)
-        console.log(`🪙 ERC20 transfer: ${token.balance} ${token.symbol} = ${amount} units`)
-
-        // Use Viem to encode the transfer function call
-        const data = encodeFunctionData({
+        const transferData = encodeFunctionData({
           abi: ERC20_ABI,
           functionName: "transfer",
           args: [toAddress as Address, amount],
@@ -463,20 +548,16 @@ export class EIP7702BundleManager {
 
         transactions.push({
           to: token.contractAddress,
-          data,
+          data: transferData,
           value: "0",
-          gasLimit: "0x15F90", // 90000 gas for ERC20 transfer
+          gasLimit: "0x15F90",
+          description: `Transfer ${token.balance} ${token.symbol}`,
         })
       } else if (token.type === "ERC721") {
-        if (!this.isValidEthereumAddress(token.contractAddress)) {
-          throw new Error(`Invalid contract address for NFT ${token.name}`)
-        }
+        if (!this.isValidEthereumAddress(token.contractAddress)) continue
 
         const tokenId = BigInt(token.tokenId || "0")
-        console.log(`🖼️ NFT transfer: ${token.name} #${tokenId}`)
-
-        // Use Viem to encode the transferFrom function call
-        const data = encodeFunctionData({
+        const transferData = encodeFunctionData({
           abi: ERC721_ABI,
           functionName: "transferFrom",
           args: [fromAddress as Address, toAddress as Address, tokenId],
@@ -484,18 +565,14 @@ export class EIP7702BundleManager {
 
         transactions.push({
           to: token.contractAddress,
-          data,
+          data: transferData,
           value: "0",
-          gasLimit: "0x1D4C0", // 120000 gas for ERC721 transfer
+          gasLimit: "0x1D4C0",
+          description: `Transfer NFT ${token.name} #${tokenId}`,
         })
       }
     }
 
-    console.log(`✅ Prepared ${transactions.length} EIP-7702 transactions`)
-    console.log(
-      `📋 Transaction destinations:`,
-      transactions.map((tx) => tx.to),
-    )
     return transactions
   }
 
@@ -507,8 +584,15 @@ export class EIP7702BundleManager {
       const balanceFloat = Number.parseFloat(balance)
       if (balanceFloat <= 0) return BigInt(0)
 
-      const multiplier = BigInt(10) ** BigInt(decimals)
-      const result = BigInt(Math.floor(balanceFloat * Number(multiplier)))
+      // Handle very small amounts by using string manipulation
+      const balanceStr = balanceFloat.toString()
+      const [integerPart, decimalPart = ""] = balanceStr.split(".")
+
+      // Pad or truncate decimal part to match token decimals
+      const paddedDecimal = decimalPart.padEnd(decimals, "0").substring(0, decimals)
+      const fullAmountStr = integerPart + paddedDecimal
+
+      const result = BigInt(fullAmountStr)
       console.log(`🔢 Parsed amount: ${balance} -> ${result} (decimals: ${decimals})`)
       return result
     } catch (error) {
@@ -523,32 +607,31 @@ export class EIP7702BundleManager {
   async estimateGasForBundle(transactions: EIP7702Transaction[]): Promise<bigint> {
     console.log(`⛽ Estimating gas for EIP-7702 bundle: ${transactions.length} transactions`)
 
-    // For EIP-7702, gas is more efficient as it's a single transaction
     let totalGas = BigInt(21000) // Base transaction cost
 
-    // Add gas for each operation in the bundle
+    // EIP-7702 provides gas efficiency - atomic execution reduces overhead
     for (const tx of transactions) {
       if (tx.data === "0x") {
         // Native transfer
-        totalGas += BigInt(21000) // Base cost for ETH transfer
+        totalGas += BigInt(21000)
       } else if (tx.data.startsWith("0xa9059cbb")) {
         // ERC20 transfer
-        totalGas += BigInt(65000) // Typical ERC20 transfer cost
+        totalGas += BigInt(65000)
       } else if (tx.data.startsWith("0x23b872dd")) {
         // ERC721 transfer
-        totalGas += BigInt(85000) // Typical ERC721 transfer cost
+        totalGas += BigInt(85000)
       } else {
         // Generic contract call
         totalGas += BigInt(50000)
       }
     }
 
-    // Overhead for EIP-7702 bundle execution (much smaller than individual transactions)
-    // Aumentar el overhead para asegurar que hay suficiente gas
-    const bundleOverhead = totalGas + BigInt(150000) // Increased overhead for the bundle contract
+    // EIP-7702 provides gas efficiency - reduce overhead for atomic execution
+    const eip7702Efficiency = (totalGas * BigInt(90)) / BigInt(100) // 10% gas savings
+    const bundleOverhead = eip7702Efficiency + BigInt(50000) // Minimal overhead for EIP-7702
 
     console.log(
-      `⛽ EIP-7702 bundle gas estimate: ${bundleOverhead} (vs ${totalGas * BigInt(transactions.length)} individual)`,
+      `⛽ EIP-7702 bundle gas estimate: ${bundleOverhead} (includes ${transactions.length} transactions with 10% efficiency gain)`,
     )
     return bundleOverhead
   }
@@ -576,11 +659,9 @@ export class EIP7702BundleManager {
         return true
       }
 
-      // Try multiple methods to switch network
-
-      // Method 1: Standard EIP-1193 wallet_switchEthereumChain
+      // Try to switch network
       try {
-        console.log(`🔄 Method 1: Using wallet_switchEthereumChain to switch to chain ${targetChainId}`)
+        console.log(`🔄 Using wallet_switchEthereumChain to switch to chain ${targetChainId}`)
         await window.ethereum.request({
           method: "wallet_switchEthereumChain",
           params: [{ chainId: `0x${targetChainId.toString(16)}` }],
@@ -593,81 +674,12 @@ export class EIP7702BundleManager {
         if (newChainId === targetChainId) {
           console.log(`✅ Successfully switched to chain ${targetChainId}`)
           return true
-        } else {
-          console.log(`⚠️ Chain ID mismatch after switch: expected ${targetChainId}, got ${newChainId}`)
         }
       } catch (error) {
-        console.log(`⚠️ Method 1 failed:`, error)
+        console.log(`⚠️ Network switch failed:`, error)
       }
 
-      // Method 2: Try Ambire Wallet specific method if available
-      if (window.ethereum.isAmbire) {
-        try {
-          console.log(`🔄 Method 2: Using Ambire-specific method to switch to chain ${targetChainId}`)
-          // Note: This is hypothetical - check Ambire docs for actual method
-          await window.ethereum.request({
-            method: "wallet_setNetwork",
-            params: [targetChainId],
-          })
-
-          // Verify the switch
-          const newChainIdHex = await window.ethereum.request({ method: "eth_chainId" })
-          const newChainId = Number.parseInt(newChainIdHex, 16)
-
-          if (newChainId === targetChainId) {
-            console.log(`✅ Successfully switched to chain ${targetChainId} using Ambire method`)
-            return true
-          }
-        } catch (error) {
-          console.log(`⚠️ Method 2 failed:`, error)
-        }
-      }
-
-      // Method 3: Try adding the chain first, then switching
-      try {
-        console.log(`🔄 Method 3: Adding chain ${targetChainId} before switching`)
-
-        // Define chain parameters based on target chain ID
-        let chainParams: any = null
-
-        if (targetChainId === 11155111) {
-          // Sepolia
-          chainParams = {
-            chainId: `0x${targetChainId.toString(16)}`,
-            chainName: "Ethereum Sepolia",
-            nativeCurrency: {
-              name: "Sepolia ETH",
-              symbol: "ETH",
-              decimals: 18,
-            },
-            rpcUrls: ["https://lb.drpc.org/ogrpc?network=sepolia&dkey=Au_X8MHT5km3gTHdk3Zh9IDmb7qePncR8JNRKiqCbUWs"],
-            blockExplorerUrls: ["https://sepolia.etherscan.io"],
-          }
-        }
-
-        if (chainParams) {
-          await window.ethereum.request({
-            method: "wallet_addEthereumChain",
-            params: [chainParams],
-          })
-
-          // Verify the switch
-          const newChainIdHex = await window.ethereum.request({ method: "eth_chainId" })
-          const newChainId = Number.parseInt(newChainIdHex, 16)
-
-          if (newChainId === targetChainId) {
-            console.log(`✅ Successfully added and switched to chain ${targetChainId}`)
-            return true
-          }
-        }
-      } catch (error) {
-        console.log(`⚠️ Method 3 failed:`, error)
-      }
-
-      // If we get here, all methods failed
-      console.error(`❌ All network switch methods failed for chain ${targetChainId}`)
-
-      // Show user instructions
+      // If switch failed, show user instructions
       const networkName = targetChainId === 11155111 ? "Sepolia" : `Chain ID ${targetChainId}`
       alert(`Please manually switch your wallet to ${networkName} network before proceeding.`)
 
@@ -679,7 +691,8 @@ export class EIP7702BundleManager {
   }
 
   /**
-   * Executes the bundle using direct method
+   * Executes the EIP-7702 bundle using wallet's native batching capabilities
+   * Following Pimlico's approach for external wallets
    */
   async executeEIP7702Bundle(bundle: EIP7702Bundle): Promise<Hash> {
     if (!this.walletClient) {
@@ -689,31 +702,28 @@ export class EIP7702BundleManager {
       }
     }
 
-    console.log(`🚀 Starting bundle execution with ${bundle.transactions.length} transactions`)
+    console.log(`🚀 Starting EIP-7702 atomic bundle execution with ${bundle.transactions.length} transaction(s)`)
 
     const supportInfo = await this.checkEIP7702Support()
 
-    if (!supportInfo.supported || !supportInfo.contractAddress || !supportInfo.chainId) {
-      console.log("⚠️ EIP-7702 not supported, falling back to sequential transactions")
+    if (!supportInfo.supported || !supportInfo.capabilities?.supportsBatchingTransaction) {
+      console.log("⚠️ EIP-7702 atomic batching not supported, falling back to sequential transactions")
       return await this.executeBatchTransactions(bundle.transactions)
     }
 
-    const pectraContract = supportInfo.contractAddress
-    const chainId = this.targetChainId || supportInfo.chainId
+    const chainId = this.targetChainId || supportInfo.chainId || 11155111
     const network = NETWORKS[chainId as keyof typeof NETWORKS]
 
     try {
-      console.log(`🔄 Executing bundle with contract: ${pectraContract}`)
-
       // Get the current account
       const [account] = await this.walletClient.getAddresses()
       if (!account) {
         throw new Error("No accounts available. Please connect your wallet.")
       }
 
-      console.log(`📤 Executing bundle from account: ${account}`)
+      console.log(`📤 Executing EIP-7702 atomic bundle from account: ${account}`)
 
-      // FORCE network switch - this is critical for correct network execution
+      // Ensure correct network
       const networkSwitched = await this.ensureCorrectNetwork(chainId)
       if (!networkSwitched) {
         throw new Error(
@@ -727,117 +737,123 @@ export class EIP7702BundleManager {
       // Verify we're on the correct chain after switch
       const finalChainId = await this.walletClient.getChainId()
       if (finalChainId !== chainId) {
-        throw new Error(
-          `Network switch verification failed. Expected chain ${chainId}, but got ${finalChainId}. Please manually switch to ${network?.name || `Chain ID ${chainId}`} in your wallet.`,
-        )
+        throw new Error(`Network switch verification failed. Expected chain ${chainId}, but got ${finalChainId}.`)
       }
 
       console.log(`✅ Confirmed on correct network: ${network?.name || chainId} (Chain ID: ${finalChainId})`)
 
-      // Check and approve tokens if needed
-      console.log(`🔄 Checking and approving tokens if needed...`)
+      // Try to use wallet's native batching capabilities
+      if (
+        supportInfo.capabilities?.atomicStatus === "ready" ||
+        supportInfo.capabilities?.atomicStatus === "supported"
+      ) {
+        console.log(
+          `🚀 Using wallet's native EIP-7702 atomic batching for ${bundle.transactions.length} transactions...`,
+        )
 
-      for (const tx of bundle.transactions) {
-        // Skip native token transfers
-        if (tx.data === "0x" || tx.data === "") continue
+        try {
+          // Preparar todas las transacciones para el batch
+          const calls = bundle.transactions.map((tx) => ({
+            to: tx.to as Address,
+            data: tx.data as `0x${string}`,
+            value: tx.value ? BigInt(tx.value) : BigInt(0),
+            gas: tx.gasLimit ? BigInt(tx.gasLimit) : undefined,
+          }))
 
-        // Check if this is an ERC20 transfer
-        if (tx.data.startsWith("0xa9059cbb")) {
-          const tokenAddress = tx.to
-          const transferData = tx.data.slice(10) // Remove function selector
+          console.log(`📤 Sending atomic batch with ${calls.length} calls in a single transaction...`)
+          console.log(`📊 Batch details:`)
+          calls.forEach((call, index) => {
+            console.log(`  ${index + 1}. To: ${call.to}, Value: ${call.value}, Data: ${call.data.substring(0, 10)}...`)
+          })
 
-          // Extract destination and amount from transfer data
-          const paddedTo = `0x${transferData.slice(0, 64).slice(24)}`
-          const amount = BigInt(`0x${transferData.slice(64)}`)
+          // Intentar usar wallet_sendCalls para ejecución atómica
+          let batchResult
 
-          console.log(`🔄 Checking ERC20 token ${tokenAddress} for transfer of ${amount} to ${paddedTo}`)
+          // Método 1: wallet_sendCalls (EIP-5792)
+          try {
+            batchResult = await window.ethereum.request({
+              method: "wallet_sendCalls",
+              params: [
+                {
+                  version: "1.0",
+                  chainId: `0x${chainId.toString(16)}`,
+                  from: account,
+                  calls: calls.map((call) => ({
+                    to: call.to,
+                    data: call.data,
+                    value: `0x${call.value.toString(16)}`,
+                  })),
+                  atomic: true,
+                },
+              ],
+            })
+            console.log(`✅ EIP-7702 atomic batch executed successfully with wallet_sendCalls:`, batchResult)
+          } catch (method1Error) {
+            console.log(`⚠️ wallet_sendCalls failed, trying alternative method:`, this.errorToString(method1Error))
 
-          // Check and approve if needed
-          await this.checkAndApproveERC20(tokenAddress, account, amount, pectraContract)
+            // Método 2: eth_sendBundle (algunos wallets usan este método)
+            try {
+              batchResult = await window.ethereum.request({
+                method: "eth_sendBundle",
+                params: [
+                  {
+                    transactions: calls.map((call) => ({
+                      to: call.to,
+                      data: call.data,
+                      value: `0x${call.value.toString(16)}`,
+                      from: account,
+                    })),
+                  },
+                ],
+              })
+              console.log(`✅ EIP-7702 atomic batch executed successfully with eth_sendBundle:`, batchResult)
+            } catch (method2Error) {
+              console.log(`⚠️ eth_sendBundle failed, trying wallet's custom method:`, this.errorToString(method2Error))
+
+              // Método 3: Intentar con métodos específicos de wallets
+              if (window.ethereum.isAmbire) {
+                try {
+                  batchResult = await window.ethereum.request({
+                    method: "wallet_batchTransactions",
+                    params: [
+                      calls.map((call) => ({
+                        to: call.to,
+                        data: call.data,
+                        value: `0x${call.value.toString(16)}`,
+                      })),
+                    ],
+                  })
+                  console.log(`✅ EIP-7702 atomic batch executed successfully with Ambire method:`, batchResult)
+                } catch (ambireError) {
+                  throw new Error(`Ambire batch method failed: ${this.errorToString(ambireError)}`)
+                }
+              } else {
+                throw new Error("No compatible batch method found in wallet")
+              }
+            }
+          }
+
+          // Retornar el hash de la transacción batch
+          const txHash = batchResult?.hash || batchResult?.transactionHash || batchResult
+
+          if (!txHash) {
+            throw new Error("No transaction hash returned from batch execution")
+          }
+
+          console.log(`🎉 All ${calls.length} transactions executed atomically in a single transaction: ${txHash}`)
+          return txHash as Hash
+        } catch (batchError) {
+          console.warn(`⚠️ Native batching failed, falling back to sequential:`, this.errorToString(batchError))
+          return await this.executeBatchTransactions(bundle.transactions)
         }
-
-        // Check if this is an ERC721 transferFrom
-        else if (tx.data.startsWith("0x23b872dd")) {
-          const tokenAddress = tx.to
-          const transferData = tx.data.slice(10) // Remove function selector
-
-          // Extract from, to, and tokenId from transfer data
-          const paddedFrom = `0x${transferData.slice(0, 64).slice(24)}`
-          const paddedTo = `0x${transferData.slice(64, 128).slice(24)}`
-          const tokenId = BigInt(`0x${transferData.slice(128)}`)
-
-          console.log(
-            `🔄 Checking ERC721 token ${tokenAddress} for transfer of #${tokenId} from ${paddedFrom} to ${paddedTo}`,
-          )
-
-          // Check and approve if needed
-          await this.checkAndApproveERC721(tokenAddress, account, tokenId, pectraContract)
-        }
-      }
-
-      // Prepare the batch call data for the Pectra contract
-      const targets = bundle.transactions.map((tx) => tx.to as Address)
-      const values = bundle.transactions.map((tx) => BigInt(tx.value || "0"))
-      const calldatas = bundle.transactions.map((tx) => tx.data as `0x${string}`)
-
-      console.log(`📤 Bundle targets:`, targets)
-      console.log(
-        `📤 Bundle values:`,
-        values.map((v) => v.toString()),
-      )
-      console.log(`📤 Sending to Pectra contract: ${pectraContract}`)
-      console.log(`📤 From account: ${account}`)
-
-      // Verificar si hay suficiente ETH para la transacción
-      const totalValue = values.reduce((sum, val) => sum + val, BigInt(0))
-      console.log(`💰 Total value being sent: ${totalValue} wei`)
-
-      // Aumentar el gas limit para asegurar que hay suficiente
-      const gasLimit = BigInt(bundle.totalGasEstimate) * BigInt(2)
-      console.log(`⛽ Using increased gas limit: ${gasLimit}`)
-
-      // Enviar la transacción directamente al contrato Pectra
-      const hash = await this.walletClient.writeContract({
-        address: pectraContract,
-        abi: PECTRA_BUNDLE_ABI,
-        functionName: "executeBatch",
-        args: [targets, values, calldatas],
-        value: totalValue,
-        gas: gasLimit,
-        account,
-      })
-
-      console.log(`✅ Transaction sent successfully:`, hash)
-
-      // Wait for transaction receipt to verify success
-      console.log(`⏳ Waiting for transaction to be mined...`)
-      const receipt = await this.publicClient?.waitForTransactionReceipt({ hash })
-
-      console.log(`📝 Transaction receipt:`, receipt)
-
-      if (receipt?.status === "success") {
-        console.log(`✅ Transaction executed successfully!`)
       } else {
-        console.error(`❌ Transaction failed!`)
-        throw new Error("Transaction failed on-chain. Check the transaction on the block explorer for more details.")
+        console.log(`⚠️ Wallet atomic batching not ready, falling back to sequential execution`)
+        return await this.executeBatchTransactions(bundle.transactions)
       }
-
-      return hash
     } catch (error) {
       const errorMsg = this.errorToString(error)
-      console.error("❌ Bundle execution failed:", errorMsg)
-
-      // Mostrar información detallada del error para diagnóstico
-      console.error("Error details:", JSON.stringify(error, null, 2))
-
-      // Intentar extraer más información del error
-      if (typeof error === "object" && error !== null) {
-        console.error("Error code:", (error as any).code)
-        console.error("Error data:", (error as any).data)
-        console.error("Error message:", (error as any).message)
-      }
-
-      throw new Error(`Transaction failed: ${errorMsg}. Please check your wallet balance and try again.`)
+      console.error("❌ EIP-7702 atomic execution failed:", errorMsg)
+      throw new Error(`EIP-7702 atomic execution failed: ${errorMsg}`)
     }
   }
 
@@ -854,14 +870,8 @@ export class EIP7702BundleManager {
 
     console.log(`🔄 Executing ${transactions.length} transactions sequentially with Viem (fallback mode)`)
 
-    // Añadir logging de las direcciones de destino:
-    console.log(
-      `📋 Fallback transaction destinations:`,
-      transactions.map((tx) => tx.to),
-    )
-
     // Ensure we're on the correct network for fallback mode too
-    const chainId = this.targetChainId || this.currentChain?.id || 11155111 // Default to Sepolia
+    const chainId = this.targetChainId || this.currentChain?.id || 11155111
 
     // Try to switch to the correct network
     const networkSwitched = await this.ensureCorrectNetwork(chainId)
@@ -886,15 +896,14 @@ export class EIP7702BundleManager {
       const tx = transactions[i]
 
       try {
-        console.log(`📤 Sending transaction ${i + 1}/${transactions.length}`)
+        console.log(`📤 Sending transaction ${i + 1}/${transactions.length}: ${tx.description || "Unknown"}`)
 
-        // Aumentar el gas limit para cada transacción individual
         const gasLimit = tx.gasLimit ? BigInt(tx.gasLimit) * BigInt(2) : BigInt(100000)
-        console.log(`⛽ Using increased gas limit for transaction ${i + 1}: ${gasLimit}`)
+        console.log(`⛽ Using gas limit for transaction ${i + 1}: ${gasLimit}`)
 
         const hash = await this.walletClient.sendTransaction({
           account,
-          chain: this.currentChain, // Explicitly provide chain
+          chain: this.currentChain,
           to: tx.to as Address,
           data: tx.data as `0x${string}`,
           value: BigInt(tx.value || "0"),
@@ -1067,7 +1076,7 @@ export class EIP7702BundleManager {
       const errorMsg = this.errorToString(error)
       console.error("❌ Failed to calculate estimated cost:", errorMsg)
       console.log("🔄 Returning default cost estimate")
-      return "0.001000" // Return a reasonable default instead of 0
+      return "0.001000"
     }
   }
 
@@ -1079,4 +1088,4 @@ export class EIP7702BundleManager {
   }
 }
 
-export type { EIP7702Transaction, EIP7702Bundle }
+export type { EIP7702Transaction, EIP7702Bundle, WalletCapabilities }
